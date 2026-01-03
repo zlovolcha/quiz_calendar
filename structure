@@ -1,0 +1,6 @@
+project/
+  bot.py
+  server.py
+  calendar_bot.sqlite3   (создастся сам)
+  webapp/
+    index.html
