@@ -16,6 +16,10 @@
     .meta { font-size: 14px; line-height: 1.35; }
     .btnrow { display:flex; gap:8px; margin-top:10px; flex-wrap:wrap; }
     .btn { flex: 1 1 140px; padding: 10px; border-radius: 10px; border: 1px solid rgba(0,0,0,.18); background: #fff; }
+    .tabs { display:flex; gap:8px; margin: 10px 0 14px; }
+    .tab { flex:1; padding:10px; border-radius:10px; border:1px solid rgba(0,0,0,.18); background:#fff; }
+    .tab.active { font-weight:700; }
+    .badge { display:inline-block; font-size:12px; padding:2px 8px; border-radius:999px; border:1px solid rgba(0,0,0,.18); margin-left:8px; }
   </style>
 </head>
 <body>
@@ -57,6 +61,11 @@
   </div>
 
   <div id="modeCalendar" style="display:none">
+    <div class="tabs">
+      <button class="tab active" id="tabAll">Все</button>
+      <button class="tab" id="tabGo">Иду</button>
+      <button class="tab" id="tabRevote">Переголосовать</button>
+    </div>
     <div class="muted" id="calHint">Загружаю встречи…</div>
     <div id="list"></div>
   </div>
@@ -68,11 +77,11 @@
     const qs = new URLSearchParams(location.search);
 
     const mode = qs.get("mode") || "";          // "calendar" | ""
-    const eventId = qs.get("event_id");         // если есть — режим редактирования
-    const apiBase = qs.get("api_base") || "";   // если пусто — тот же домен
+    const eventId = qs.get("event_id");
+    const apiBase = qs.get("api_base") || "";
 
-    const chatId = qs.get("chat_id");           // для календаря
-    const sig = qs.get("sig");                  // для календаря
+    const chatId = qs.get("chat_id");
+    const sig = qs.get("sig");
 
     const h = document.getElementById("titleH");
     const hint = document.getElementById("hint");
@@ -81,6 +90,26 @@
     const modeCalendar = document.getElementById("modeCalendar");
     const calHint = document.getElementById("calHint");
     const list = document.getElementById("list");
+
+    const tabAll = document.getElementById("tabAll");
+    const tabGo = document.getElementById("tabGo");
+    const tabRevote = document.getElementById("tabRevote");
+
+    let allItems = [];
+    let activeFilter = "all"; // all | go | revote
+
+    function setActiveTab(which) {
+      activeFilter = which;
+      [tabAll, tabGo, tabRevote].forEach(b => b.classList.remove("active"));
+      if (which === "all") tabAll.classList.add("active");
+      if (which === "go") tabGo.classList.add("active");
+      if (which === "revote") tabRevote.classList.add("active");
+      renderList();
+    }
+
+    tabAll.onclick = () => setActiveTab("all");
+    tabGo.onclick = () => setActiveTab("go");
+    tabRevote.onclick = () => setActiveTab("revote");
 
     function setFromIso(dtIso) {
       const dt = new Date(dtIso);
@@ -145,30 +174,56 @@
       return `${yyyy}-${mm}-${dd} ${hh}:${mi}`;
     }
 
-    async function loadCalendar() {
-      h.textContent = "Календарь встреч";
-      modeCreateEdit.style.display = "none";
-      modeCalendar.style.display = "block";
+    // "День события ещё не закончился" = событие в тот же календарный день или позже (по локали пользователя)
+    function dayNotEnded(dtIso) {
+      const d = new Date(dtIso);
+      const now = new Date();
+      // сравниваем по YYYY-MM-DD
+      const a = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+      const b = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,"0")}-${String(now.getDate()).padStart(2,"0")}`;
+      return a >= b;
+    }
 
-      if (!chatId || !sig) {
-        calHint.textContent = "Не переданы параметры чата (chat_id/sig). Открой календарь кнопкой из чата.";
-        return;
+    function eventNotStarted(dtIso) {
+      const d = new Date(dtIso);
+      return d.getTime() > Date.now();
+    }
+
+    function voteBadge(v) {
+      if (v === "yes") return "Я в деле";
+      if (v === "maybe") return "Надо подумать";
+      if (v === "no") return "Не смогу";
+      return null;
+    }
+
+    function filteredItems() {
+      if (activeFilter === "all") return allItems;
+
+      if (activeFilter === "go") {
+        // "иду" = my_vote yes и день события еще не закончился
+        return allItems.filter(it => it.my_vote === "yes" && dayNotEnded(it.dt_iso));
       }
 
-      const url = `${apiBase}/api/calendar/upcoming?chat_id=${encodeURIComponent(chatId)}&sig=${encodeURIComponent(sig)}&limit=30`;
-      const resp = await fetch(url);
-      if (!resp.ok) {
-        calHint.textContent = "Не удалось загрузить встречи.";
-        return;
+      if (activeFilter === "revote") {
+        // "переголосовать" = my_vote maybe и событие еще не наступило
+        return allItems.filter(it => it.my_vote === "maybe" && eventNotStarted(it.dt_iso));
       }
-      const items = await resp.json();
+
+      return allItems;
+    }
+
+    function renderList() {
+      const items = filteredItems();
+      list.innerHTML = "";
+
       if (!items.length) {
-        calHint.textContent = "Ближайших встреч нет.";
+        calHint.textContent = activeFilter === "all"
+          ? "Ближайших встреч нет."
+          : "Ничего не найдено по фильтру.";
         return;
       }
       calHint.textContent = "";
 
-      list.innerHTML = "";
       items.forEach(it => {
         const div = document.createElement("div");
         div.className = "card";
@@ -176,6 +231,14 @@
         const title = document.createElement("div");
         title.className = "title";
         title.textContent = it.title;
+
+        const badgeText = voteBadge(it.my_vote);
+        if (badgeText) {
+          const badge = document.createElement("span");
+          badge.className = "badge";
+          badge.textContent = badgeText;
+          title.appendChild(badge);
+        }
 
         const meta = document.createElement("div");
         meta.className = "meta";
@@ -204,8 +267,10 @@
         btnEdit.className = "btn";
         btnEdit.textContent = "Редактировать";
         btnEdit.onclick = () => {
-          // просто переходим в режим редактирования
-          location.href = `./event-form?event_id=${encodeURIComponent(it.id)}`;
+          // Переходим на редактирование в той же форме
+          // Если у тебя /event-form, то лучше абсолютный путь:
+          // location.href = `/event-form?event_id=${it.id}`
+          location.href = `/event-form?event_id=${encodeURIComponent(it.id)}`;
         };
 
         btnRow.appendChild(btnOpen);
@@ -220,13 +285,39 @@
       });
     }
 
-    // Роутинг режимов
+    async function loadCalendar() {
+      h.textContent = "Календарь встреч";
+      modeCreateEdit.style.display = "none";
+      modeCalendar.style.display = "block";
+
+      if (!chatId || !sig) {
+        calHint.textContent = "Не переданы параметры чата (chat_id/sig). Открой календарь кнопкой из чата.";
+        return;
+      }
+
+      calHint.textContent = "Загружаю встречи…";
+
+      const url = `${apiBase}/api/calendar/upcoming?chat_id=${encodeURIComponent(chatId)}&sig=${encodeURIComponent(sig)}&limit=100`;
+      const resp = await fetch(url, {
+        headers: { "X-Telegram-InitData": tg.initData }
+      });
+
+      if (!resp.ok) {
+        calHint.textContent = "Не удалось загрузить встречи.";
+        return;
+      }
+
+      allItems = await resp.json();
+      // по умолчанию "Все"
+      setActiveTab("all");
+    }
+
     if (mode === "calendar") {
       loadCalendar().catch(() => calHint.textContent = "Ошибка загрузки календаря.");
     } else {
-      // create/edit режим
       modeCreateEdit.style.display = "block";
       modeCalendar.style.display = "none";
+
       if (eventId) loadEvent(eventId).catch(() => hint.textContent = "Ошибка загрузки.");
 
       document.getElementById("send").onclick = async () => {
@@ -243,7 +334,6 @@
         const details = (document.getElementById("details").value || "").trim();
 
         if (!eventId) {
-          // Создание — через бота (чтобы TZ было единообразно)
           tg.sendData(JSON.stringify({
             action: "create",
             date, time,
