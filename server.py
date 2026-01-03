@@ -13,6 +13,9 @@ from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+from dotenv import load_dotenv
+load_dotenv()
+
 DB_PATH = "calendar_bot.sqlite3"
 TZ = ZoneInfo("Europe/Vilnius")
 
