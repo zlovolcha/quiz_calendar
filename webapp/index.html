@@ -54,13 +54,14 @@
     tg.ready();
 
     const qs = new URLSearchParams(location.search);
-    const eventId = qs.get("event_id"); // если есть — режим редактирования
-    const apiBase = qs.get("api_base") || ""; // можно прокинуть api_base в URL, но обычно одинаковый домен
+    const eventId = qs.get("event_id");         // если есть — режим редактирования
+    const apiBase = qs.get("api_base") || "";   // если пусто — тот же домен
 
     const h = document.getElementById("titleH");
     const hint = document.getElementById("hint");
 
     function setFromIso(dtIso) {
+      // dtIso в БД хранится как ISO с timezone, new Date() его понимает
       const dt = new Date(dtIso);
       const yyyy = dt.getFullYear();
       const mm = String(dt.getMonth() + 1).padStart(2, "0");
@@ -88,33 +89,78 @@
       hint.textContent = "";
     }
 
+    async function putEvent(id, patch) {
+      const resp = await fetch(`${apiBase}/api/event/${id}`, {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Telegram-InitData": tg.initData
+        },
+        body: JSON.stringify(patch)
+      });
+      if (!resp.ok) {
+        const t = await resp.text().catch(() => "");
+        throw new Error(`API error ${resp.status}: ${t}`);
+      }
+    }
+
     if (eventId) {
       loadEvent(eventId).catch(() => hint.textContent = "Ошибка загрузки.");
     }
 
-    document.getElementById("send").onclick = () => {
+    document.getElementById("send").onclick = async () => {
       const date = document.getElementById("date").value;
       const time = document.getElementById("time").value;
+
       if (!date || !time) {
         hint.textContent = "Нужны дата и время.";
         return;
       }
 
-      // В WebApp у нас нет часового пояса чата наверняка — проще отправить отдельно date+time,
-      // а TZ выставит бот. Но для удобства редактирования мы можем отправить готовую “локальную” строку.
-      const payload = {
-        action: eventId ? "edit" : "create",
-        event_id: eventId ? Number(eventId) : null,
-        date,
-        time,
-        title: document.getElementById("title").value,
-        cost: document.getElementById("cost").value,
-        location: document.getElementById("location").value,
-        details: document.getElementById("details").value
-      };
+      const title = (document.getElementById("title").value || "Встреча").trim();
+      const cost = (document.getElementById("cost").value || "-").trim();
+      const location = (document.getElementById("location").value || "-").trim();
+      const details = (document.getElementById("details").value || "").trim();
 
-      tg.sendData(JSON.stringify(payload));
-      tg.close();
+      if (!eventId) {
+        // Создание — через бота (проще и надёжнее по TZ)
+        tg.sendData(JSON.stringify({
+          action: "create",
+          date, time,
+          title, cost, location, details
+        }));
+        tg.close();
+        return;
+      }
+
+      // Редактирование — через API (защищено initData),
+      // время отправляем как date+time, а в dt_iso сформируем в локальном TZ устройства.
+      // Сервер принимает tz, а бот пересчитает напоминания и обновит карточку.
+      const local = new Date(`${date}T${time}:00`);
+      const tzOffsetMin = local.getTimezoneOffset();
+      // сформируем ISO с offset (не UTC)
+      const pad = (n) => String(Math.abs(n)).padStart(2, "0");
+      const sign = tzOffsetMin <= 0 ? "+" : "-";
+      const offH = pad(Math.floor(Math.abs(tzOffsetMin) / 60));
+      const offM = pad(Math.abs(tzOffsetMin) % 60);
+      const isoLocal =
+        `${date}T${time}:00${sign}${offH}:${offM}`;
+
+      try {
+        await putEvent(eventId, {
+          dt_iso: isoLocal,
+          title, cost, location, details
+        });
+
+        // Сообщим боту, чтобы он обновил карточку и напоминания (бот отвечает за чат)
+        tg.sendData(JSON.stringify({
+          action: "edited_via_api",
+          event_id: Number(eventId)
+        }));
+        tg.close();
+      } catch (e) {
+        hint.textContent = "Не удалось сохранить: " + e.message;
+      }
     };
   </script>
 </body>
