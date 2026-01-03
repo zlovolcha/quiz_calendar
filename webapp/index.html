@@ -11,57 +11,78 @@
     input, textarea { width: 100%; padding: 10px; font-size: 16px; box-sizing: border-box; }
     button { width: 100%; padding: 12px; font-size: 16px; margin-top: 10px; }
     .muted { color: #666; font-size: 13px; margin-top: 6px; }
+    .card { border: 1px solid rgba(0,0,0,.12); border-radius: 12px; padding: 12px; margin: 10px 0; }
+    .title { font-weight: 700; font-size: 16px; margin-bottom: 6px; }
+    .meta { font-size: 14px; line-height: 1.35; }
+    .btnrow { display:flex; gap:8px; margin-top:10px; flex-wrap:wrap; }
+    .btn { flex: 1 1 140px; padding: 10px; border-radius: 10px; border: 1px solid rgba(0,0,0,.18); background: #fff; }
   </style>
 </head>
 <body>
   <h3 id="titleH">Новая встреча</h3>
 
-  <div class="row">
-    <label>Дата</label>
-    <input id="date" type="date"/>
+  <div id="modeCreateEdit">
+    <div class="row">
+      <label>Дата</label>
+      <input id="date" type="date"/>
+    </div>
+
+    <div class="row">
+      <label>Время</label>
+      <input id="time" type="time"/>
+    </div>
+
+    <div class="row">
+      <label>Название</label>
+      <input id="title" placeholder="например, Квиз"/>
+    </div>
+
+    <div class="row">
+      <label>Стоимость</label>
+      <input id="cost" placeholder="например, 10€"/>
+    </div>
+
+    <div class="row">
+      <label>Локация</label>
+      <input id="location" placeholder="например, Бар «Пингвин»"/>
+    </div>
+
+    <div class="row">
+      <label>Детали (опционально)</label>
+      <textarea id="details" rows="4" placeholder="как найтись, что взять и т.д."></textarea>
+    </div>
+
+    <button id="send">Сохранить</button>
+    <div class="muted" id="hint"></div>
   </div>
 
-  <div class="row">
-    <label>Время</label>
-    <input id="time" type="time"/>
+  <div id="modeCalendar" style="display:none">
+    <div class="muted" id="calHint">Загружаю встречи…</div>
+    <div id="list"></div>
   </div>
-
-  <div class="row">
-    <label>Название</label>
-    <input id="title" placeholder="например, Квиз"/>
-  </div>
-
-  <div class="row">
-    <label>Стоимость</label>
-    <input id="cost" placeholder="например, 10€"/>
-  </div>
-
-  <div class="row">
-    <label>Локация</label>
-    <input id="location" placeholder="например, Бар «Пингвин»"/>
-  </div>
-
-  <div class="row">
-    <label>Детали (опционально)</label>
-    <textarea id="details" rows="4" placeholder="как найтись, что взять и т.д."></textarea>
-  </div>
-
-  <button id="send">Сохранить</button>
-  <div class="muted" id="hint"></div>
 
   <script>
     const tg = window.Telegram.WebApp;
     tg.ready();
 
     const qs = new URLSearchParams(location.search);
+
+    const mode = qs.get("mode") || "";          // "calendar" | ""
     const eventId = qs.get("event_id");         // если есть — режим редактирования
     const apiBase = qs.get("api_base") || "";   // если пусто — тот же домен
+
+    const chatId = qs.get("chat_id");           // для календаря
+    const sig = qs.get("sig");                  // для календаря
 
     const h = document.getElementById("titleH");
     const hint = document.getElementById("hint");
 
+    const modeCreateEdit = document.getElementById("modeCreateEdit");
+    const modeCalendar = document.getElementById("modeCalendar");
+    const calHint = document.getElementById("calHint");
+    const list = document.getElementById("list");
+
     function setFromIso(dtIso) {
-      // dtIso в БД хранится как ISO с timezone, new Date() его понимает
       const dt = new Date(dtIso);
       const yyyy = dt.getFullYear();
       const mm = String(dt.getMonth() + 1).padStart(2, "0");
@@ -104,64 +125,150 @@
       }
     }
 
-    if (eventId) {
-      loadEvent(eventId).catch(() => hint.textContent = "Ошибка загрузки.");
-    }
-
-    document.getElementById("send").onclick = async () => {
-      const date = document.getElementById("date").value;
-      const time = document.getElementById("time").value;
-
-      if (!date || !time) {
-        hint.textContent = "Нужны дата и время.";
-        return;
-      }
-
-      const title = (document.getElementById("title").value || "Встреча").trim();
-      const cost = (document.getElementById("cost").value || "-").trim();
-      const location = (document.getElementById("location").value || "-").trim();
-      const details = (document.getElementById("details").value || "").trim();
-
-      if (!eventId) {
-        // Создание — через бота (проще и надёжнее по TZ)
-        tg.sendData(JSON.stringify({
-          action: "create",
-          date, time,
-          title, cost, location, details
-        }));
-        tg.close();
-        return;
-      }
-
-      // Редактирование — через API (защищено initData),
-      // время отправляем как date+time, а в dt_iso сформируем в локальном TZ устройства.
-      // Сервер принимает tz, а бот пересчитает напоминания и обновит карточку.
+    function isoWithOffset(date, time) {
       const local = new Date(`${date}T${time}:00`);
       const tzOffsetMin = local.getTimezoneOffset();
-      // сформируем ISO с offset (не UTC)
       const pad = (n) => String(Math.abs(n)).padStart(2, "0");
       const sign = tzOffsetMin <= 0 ? "+" : "-";
       const offH = pad(Math.floor(Math.abs(tzOffsetMin) / 60));
       const offM = pad(Math.abs(tzOffsetMin) % 60);
-      const isoLocal =
-        `${date}T${time}:00${sign}${offH}:${offM}`;
+      return `${date}T${time}:00${sign}${offH}:${offM}`;
+    }
 
-      try {
-        await putEvent(eventId, {
-          dt_iso: isoLocal,
-          title, cost, location, details
-        });
+    function fmt(dtIso) {
+      const d = new Date(dtIso);
+      const yyyy = d.getFullYear();
+      const mm = String(d.getMonth()+1).padStart(2,"0");
+      const dd = String(d.getDate()).padStart(2,"0");
+      const hh = String(d.getHours()).padStart(2,"0");
+      const mi = String(d.getMinutes()).padStart(2,"0");
+      return `${yyyy}-${mm}-${dd} ${hh}:${mi}`;
+    }
 
-        // Сообщим боту, чтобы он обновил карточку и напоминания (бот отвечает за чат)
-        tg.sendData(JSON.stringify({
-          action: "edited_via_api",
-          event_id: Number(eventId)
-        }));
-        tg.close();
-      } catch (e) {
-        hint.textContent = "Не удалось сохранить: " + e.message;
+    async function loadCalendar() {
+      h.textContent = "Календарь встреч";
+      modeCreateEdit.style.display = "none";
+      modeCalendar.style.display = "block";
+
+      if (!chatId || !sig) {
+        calHint.textContent = "Не переданы параметры чата (chat_id/sig). Открой календарь кнопкой из чата.";
+        return;
       }
-    };
+
+      const url = `${apiBase}/api/calendar/upcoming?chat_id=${encodeURIComponent(chatId)}&sig=${encodeURIComponent(sig)}&limit=30`;
+      const resp = await fetch(url);
+      if (!resp.ok) {
+        calHint.textContent = "Не удалось загрузить встречи.";
+        return;
+      }
+      const items = await resp.json();
+      if (!items.length) {
+        calHint.textContent = "Ближайших встреч нет.";
+        return;
+      }
+      calHint.textContent = "";
+
+      list.innerHTML = "";
+      items.forEach(it => {
+        const div = document.createElement("div");
+        div.className = "card";
+
+        const title = document.createElement("div");
+        title.className = "title";
+        title.textContent = it.title;
+
+        const meta = document.createElement("div");
+        meta.className = "meta";
+        meta.innerHTML = `🕒 ${fmt(it.dt_iso)}<br>📍 ${it.location}<br>💸 ${it.cost}`;
+
+        const btnRow = document.createElement("div");
+        btnRow.className = "btnrow";
+
+        const btnOpen = document.createElement("button");
+        btnOpen.className = "btn";
+        btnOpen.textContent = it.poll_link ? "Открыть опрос" : "Открыть (нет ссылки)";
+        btnOpen.disabled = !it.poll_link;
+        btnOpen.onclick = () => {
+          if (it.poll_link) tg.openTelegramLink(it.poll_link);
+        };
+
+        const btnIcs = document.createElement("button");
+        btnIcs.className = "btn";
+        btnIcs.textContent = "Добавить в мой календарь";
+        btnIcs.onclick = () => {
+          tg.sendData(JSON.stringify({ action: "ics_request", event_id: it.id }));
+          tg.close();
+        };
+
+        const btnEdit = document.createElement("button");
+        btnEdit.className = "btn";
+        btnEdit.textContent = "Редактировать";
+        btnEdit.onclick = () => {
+          // просто переходим в режим редактирования
+          location.href = `./event-form?event_id=${encodeURIComponent(it.id)}`;
+        };
+
+        btnRow.appendChild(btnOpen);
+        btnRow.appendChild(btnIcs);
+        btnRow.appendChild(btnEdit);
+
+        div.appendChild(title);
+        div.appendChild(meta);
+        div.appendChild(btnRow);
+
+        list.appendChild(div);
+      });
+    }
+
+    // Роутинг режимов
+    if (mode === "calendar") {
+      loadCalendar().catch(() => calHint.textContent = "Ошибка загрузки календаря.");
+    } else {
+      // create/edit режим
+      modeCreateEdit.style.display = "block";
+      modeCalendar.style.display = "none";
+      if (eventId) loadEvent(eventId).catch(() => hint.textContent = "Ошибка загрузки.");
+
+      document.getElementById("send").onclick = async () => {
+        const date = document.getElementById("date").value;
+        const time = document.getElementById("time").value;
+        if (!date || !time) {
+          hint.textContent = "Нужны дата и время.";
+          return;
+        }
+
+        const title = (document.getElementById("title").value || "Встреча").trim();
+        const cost = (document.getElementById("cost").value || "-").trim();
+        const locationVal = (document.getElementById("location").value || "-").trim();
+        const details = (document.getElementById("details").value || "").trim();
+
+        if (!eventId) {
+          // Создание — через бота (чтобы TZ было единообразно)
+          tg.sendData(JSON.stringify({
+            action: "create",
+            date, time,
+            title, cost, location: locationVal, details
+          }));
+          tg.close();
+          return;
+        }
+
+        try {
+          const dtIso = isoWithOffset(date, time);
+          await putEvent(eventId, {
+            dt_iso: dtIso,
+            title, cost,
+            location: locationVal,
+            details
+          });
+
+          tg.sendData(JSON.stringify({ action:"edited_via_api", event_id: Number(eventId) }));
+          tg.close();
+        } catch (e) {
+          hint.textContent = "Не удалось сохранить: " + e.message;
+        }
+      };
+    }
   </script>
 </body>
 </html>
