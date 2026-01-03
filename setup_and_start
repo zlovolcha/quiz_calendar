@@ -1,0 +1,8 @@
+python -m venv .venv
+source .venv/bin/activate
+pip install -U aiogram aiosqlite fastapi uvicorn
+
+export BOT_TOKEN="..."
+export WEBAPP_URL="https://YOUR_DOMAIN/event-form"   # где будет доступна форма
+export API_BASE="https://YOUR_DOMAIN"                 # где будет доступен FastAPI
+python bot.py
