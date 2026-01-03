@@ -5,10 +5,10 @@ import hashlib
 import urllib.parse
 from datetime import datetime
 from zoneinfo import ZoneInfo
-from typing import Optional
+from typing import Optional, List
 
 import aiosqlite
-from fastapi import FastAPI, HTTPException, Header
+from fastapi import FastAPI, HTTPException, Header, Query
 from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -22,8 +22,6 @@ if not BOT_TOKEN:
 
 app = FastAPI()
 
-# Если форма и API на одном домене — CORS не нужен.
-# Если на разных доменах — можно оставить и ограничить allow_origins.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -70,9 +68,8 @@ CREATE TABLE IF NOT EXISTS reminders (
 );
 
 CREATE INDEX IF NOT EXISTS idx_events_chat_dt ON events(chat_id, dt_iso);
-CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders(sent, run_at_iso);
+CREATE INDEX IF NOT EXISTS idx_votes_poll_user ON votes(poll_id, user_id);
 """
-
 
 @app.on_event("startup")
 async def startup():
@@ -82,14 +79,9 @@ async def startup():
 
 
 def telegram_webapp_verify_initdata(init_data: str) -> dict:
-    """
-    Проверка подписи initData по Telegram WebApp.
-    Возвращает dict с user (initDataUnsafe.user), если подпись валидна.
-    """
     if not init_data:
         raise HTTPException(401, "Missing initData")
 
-    # init_data: "query_id=...&user=...&auth_date=...&hash=..."
     try:
         parsed = urllib.parse.parse_qs(init_data, strict_parsing=True)
     except Exception:
@@ -100,7 +92,6 @@ def telegram_webapp_verify_initdata(init_data: str) -> dict:
 
     received_hash = parsed["hash"][0]
 
-    # Собираем data_check_string из всех ключей кроме hash
     pairs = []
     for k in sorted(parsed.keys()):
         if k == "hash":
@@ -109,7 +100,6 @@ def telegram_webapp_verify_initdata(init_data: str) -> dict:
         pairs.append(f"{k}={v}")
     data_check_string = "\n".join(pairs)
 
-    # secret_key = HMAC_SHA256("WebAppData", bot_token)
     secret_key = hmac.new(b"WebAppData", BOT_TOKEN.encode("utf-8"), hashlib.sha256).digest()
     computed_hash = hmac.new(secret_key, data_check_string.encode("utf-8"), hashlib.sha256).hexdigest()
 
@@ -131,6 +121,19 @@ def telegram_webapp_verify_initdata(init_data: str) -> dict:
     return {"user": user}
 
 
+def _chat_sig_expected(chat_id: int) -> str:
+    key = hashlib.sha256(BOT_TOKEN.encode("utf-8")).digest()
+    msg = str(chat_id).encode("utf-8")
+    full = hmac.new(key, msg, hashlib.sha256).hexdigest()
+    return full[:20]
+
+
+def verify_chat_sig(chat_id: int, sig: str):
+    exp = _chat_sig_expected(chat_id)
+    if not sig or not hmac.compare_digest(exp, sig):
+        raise HTTPException(403, "bad signature")
+
+
 class EventView(BaseModel):
     id: int
     chat_id: int
@@ -147,6 +150,17 @@ class EventPatch(BaseModel):
     cost: str
     location: str
     details: Optional[str] = ""
+
+
+class CalendarItem(BaseModel):
+    id: int
+    dt_iso: str
+    title: str
+    cost: str
+    location: str
+    details: str
+    poll_link: Optional[str] = None
+    my_vote: Optional[str] = None  # "yes" | "maybe" | "no" | None
 
 
 @app.get("/event-form", response_class=HTMLResponse)
@@ -191,7 +205,6 @@ async def api_update_event(
     auth = telegram_webapp_verify_initdata(x_telegram_initdata)
     user_id = int(auth["user"]["id"])
 
-    # Валидация времени
     try:
         dt = datetime.fromisoformat(patch.dt_iso)
         if dt.tzinfo is None:
@@ -212,7 +225,6 @@ async def api_update_event(
 
         creator_user_id = row[0]
         if creator_user_id is None:
-            # если старое событие без автора — запрещаем правку (можешь поменять на разрешить)
             raise HTTPException(403, "not allowed")
 
         if int(creator_user_id) != user_id:
@@ -225,3 +237,72 @@ async def api_update_event(
         await db.commit()
 
     return {"ok": True}
+
+
+@app.get("/api/calendar/upcoming", response_model=List[CalendarItem])
+async def api_calendar_upcoming(
+    chat_id: int = Query(...),
+    sig: str = Query(...),
+    limit: int = Query(50, ge=1, le=200),
+    x_telegram_initdata: str = Header(default="", alias="X-Telegram-InitData"),
+):
+    """
+    Возвращает ближайшие события + голос текущего пользователя (my_vote).
+    Требует:
+      - chat_id + sig (подпись от бота)
+      - initData (чтобы знать user.id)
+    """
+    verify_chat_sig(chat_id, sig)
+    auth = telegram_webapp_verify_initdata(x_telegram_initdata)
+    user_id = int(auth["user"]["id"])
+
+    now_iso = datetime.now(tz=TZ).isoformat()
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            """
+            SELECT
+              e.id, e.dt_iso, e.title, e.cost, e.location, e.details, e.poll_message_id, e.poll_id,
+              v.option_id
+            FROM events e
+            LEFT JOIN votes v
+              ON v.poll_id = e.poll_id AND v.user_id = ?
+            WHERE e.chat_id = ? AND e.dt_iso >= ?
+            ORDER BY e.dt_iso ASC
+            LIMIT ?
+            """,
+            (user_id, chat_id, now_iso, limit),
+        )
+        rows = await cur.fetchall()
+        await cur.close()
+
+    items: List[CalendarItem] = []
+    for (eid, dt_iso, title, cost, location, details, poll_mid, poll_id, option_id) in rows:
+        poll_link = None
+        if str(chat_id).startswith("-100"):
+            internal = int(str(abs(chat_id))[3:])
+            poll_link = f"https://t.me/c/{internal}/{poll_mid}"
+
+        my_vote = None
+        # option_id: 0=yes,1=maybe,2=no
+        if option_id is not None:
+            if int(option_id) == 0:
+                my_vote = "yes"
+            elif int(option_id) == 1:
+                my_vote = "maybe"
+            elif int(option_id) == 2:
+                my_vote = "no"
+
+        items.append(CalendarItem(
+            id=eid,
+            dt_iso=dt_iso,
+            title=title,
+            cost=cost,
+            location=location,
+            details=details,
+            poll_link=poll_link,
+            my_vote=my_vote
+        ))
+
+    return items
+
