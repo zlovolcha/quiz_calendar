@@ -1,12 +1,11 @@
 import os
-import re
 import json
 import asyncio
 import logging
 import hashlib
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
-from typing import Optional, List, Tuple
+from typing import Optional, List
 
 import aiosqlite
 from aiogram import Bot, Dispatcher, Router, F
@@ -17,15 +16,16 @@ from aiogram.types import (
     FSInputFile
 )
 from aiogram.enums import ParseMode
+from aiogram.exceptions import TelegramForbiddenError
 
 logging.basicConfig(level=logging.INFO)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-WEBAPP_URL = os.getenv("WEBAPP_URL", "http://localhost:8000/event-form")
-API_BASE = os.getenv("API_BASE", "http://localhost:8000")
-
 if not BOT_TOKEN:
     raise RuntimeError("Set BOT_TOKEN env var")
+
+# URL до формы (endpoint сервера, который отдаёт webapp/index.html)
+WEBAPP_URL = os.getenv("WEBAPP_URL", "http://localhost:8000/event-form")
 
 TZ = ZoneInfo("Europe/Vilnius")
 DB_PATH = "calendar_bot.sqlite3"
@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS events (
   poll_id TEXT NOT NULL UNIQUE,
   poll_message_id INTEGER NOT NULL,
   card_message_id INTEGER,
+  creator_user_id INTEGER,
   dt_iso TEXT NOT NULL,
   title TEXT NOT NULL,
   cost TEXT NOT NULL,
@@ -88,24 +89,22 @@ def format_card(dt: datetime, title: str, cost: str, location: str, details: str
         f"📍 {location}\n"
         f"💸 {cost}"
     )
-    if details.strip():
+    if (details or "").strip():
         text += f"\n\n📝 {details.strip()}"
     return text
 
-def build_message_link(chat_id: int, message_id: int, chat_username: Optional[str]) -> Optional[str]:
+def build_poll_link(chat_id: int, poll_message_id: int, chat_username: Optional[str]) -> Optional[str]:
     if chat_username:
-        return f"https://t.me/{chat_username}/{message_id}"
+        return f"https://t.me/{chat_username}/{poll_message_id}"
     if str(chat_id).startswith("-100"):
         internal = int(str(abs(chat_id))[3:])
-        return f"https://t.me/c/{internal}/{message_id}"
+        return f"https://t.me/c/{internal}/{poll_message_id}"
     return None
 
 def kb_new_event():
-    # Можно прокинуть api_base параметром в URL, если нужно.
-    url = WEBAPP_URL
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="➕ Создать встречу (форма)", web_app=WebAppInfo(url=url))],
-        [InlineKeyboardButton(text="📅 Календарь", callback_data="calendar:show")]
+        [InlineKeyboardButton(text="➕ Создать встречу (форма)", web_app=WebAppInfo(url=WEBAPP_URL))],
+        [InlineKeyboardButton(text="📅 Календарь", callback_data="calendar:show")],
     ])
 
 def kb_event_actions(event_id: int):
@@ -128,6 +127,7 @@ async def init_db():
 async def create_or_replace_reminders(db, event_id: int, dt: datetime):
     t36 = dt - timedelta(hours=36)
     t3 = dt - timedelta(hours=3)
+
     await db.execute("DELETE FROM reminders WHERE event_id=?", (event_id,))
     if t36 > now_tz():
         await db.execute(
@@ -187,6 +187,7 @@ async def reminders_worker(bot: Bot):
                     chat_id, poll_id, poll_msg_id, dt_iso, title, cost, location, details = event
                     dt = datetime.fromisoformat(dt_iso).astimezone(TZ)
 
+                    # link гарантированно строим только для супергрупп (-100...)
                     link = None
                     if str(chat_id).startswith("-100"):
                         internal = int(str(abs(chat_id))[3:])
@@ -225,6 +226,12 @@ async def reminders_worker(bot: Bot):
             logging.exception("reminders_worker error")
         await asyncio.sleep(30)
 
+@router.message(Command("start"))
+async def cmd_start(message: Message):
+    await message.answer(
+        "✅ Готово! Теперь я могу присылать тебе личные .ics-файлы и другие персональные штуки.\n"
+        "Вернись в чат и нажми «Добавить в мой календарь» под нужной встречей."
+    )
 
 @router.message(Command("new"))
 async def cmd_new(message: Message):
@@ -233,12 +240,22 @@ async def cmd_new(message: Message):
         return
     await message.answer("Создание встречи:", reply_markup=kb_new_event())
 
+@router.callback_query(F.data == "calendar:show")
+async def cb_calendar(cb: CallbackQuery):
+    # просто дергаем /calendar поведение
+    await cb.answer()
+    msg = cb.message
+    if msg:
+        fake = Message.model_validate(msg.model_dump())
+        # не делаем магию, просто скажем пользователю команду
+        await msg.answer("Напиши /calendar чтобы увидеть ближайшие встречи.")
 
 @router.message(Command("calendar"))
 async def cmd_calendar(message: Message):
     if message.chat.type not in ("group", "supergroup"):
         await message.answer("Календарь работает в группах/супергруппах.")
         return
+
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
             "SELECT id, dt_iso, title, cost, location FROM events WHERE chat_id=? AND dt_iso>=? ORDER BY dt_iso LIMIT 10",
@@ -257,7 +274,6 @@ async def cmd_calendar(message: Message):
         lines.append(f"• {dt.strftime('%Y-%m-%d %H:%M')} — **{title}** ({location}, {cost})")
     await message.answer("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
 
-
 @router.message(F.web_app_data)
 async def on_webapp_data(message: Message, bot: Bot):
     if message.chat.type not in ("group", "supergroup"):
@@ -270,24 +286,24 @@ async def on_webapp_data(message: Message, bot: Bot):
         await message.answer("Не смог прочитать данные формы 😕")
         return
 
-    action = data.get("action")
-    date = (data.get("date") or "").strip()
-    time = (data.get("time") or "").strip()
-    title = (data.get("title") or "Встреча").strip()
-    cost = (data.get("cost") or "-").strip()
-    location = (data.get("location") or "-").strip()
-    details = (data.get("details") or "").strip()
+    # Создание события (через бота)
+    if data.get("action") == "create":
+        date = (data.get("date") or "").strip()
+        time = (data.get("time") or "").strip()
+        title = (data.get("title") or "Встреча").strip()
+        cost = (data.get("cost") or "-").strip()
+        location = (data.get("location") or "-").strip()
+        details = (data.get("details") or "").strip()
 
-    if not date or not time:
-        await message.answer("Нужны дата и время.")
-        return
+        if not date or not time:
+            await message.answer("Нужны дата и время.")
+            return
 
-    dt = datetime.strptime(f"{date} {time}", "%Y-%m-%d %H:%M").replace(tzinfo=TZ)
-    if dt <= now_tz():
-        await message.answer("Похоже, это время уже в прошлом.")
-        return
+        dt = datetime.strptime(f"{date} {time}", "%Y-%m-%d %H:%M").replace(tzinfo=TZ)
+        if dt <= now_tz():
+            await message.answer("Похоже, это время уже в прошлом.")
+            return
 
-    if action == "create":
         # 1) карточка
         card_msg = await bot.send_message(
             message.chat.id,
@@ -307,13 +323,14 @@ async def on_webapp_data(message: Message, bot: Bot):
         # 3) сохраняем
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute(
-                "INSERT INTO events(chat_id, poll_id, poll_message_id, card_message_id, dt_iso, title, cost, location, details, created_at_iso) "
-                "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO events(chat_id, poll_id, poll_message_id, card_message_id, creator_user_id, dt_iso, title, cost, location, details, created_at_iso) "
+                "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     message.chat.id,
                     poll_msg.poll.id,
                     poll_msg.message_id,
                     card_msg.message_id,
+                    message.from_user.id if message.from_user else None,
                     dt.isoformat(),
                     title,
                     cost,
@@ -337,63 +354,50 @@ async def on_webapp_data(message: Message, bot: Bot):
             reply_markup=kb_event_actions(event_id),
         )
 
-        # 5) автозакреп (если бот админ)
+        # 5) автозакреп карточки (если бот админ)
         try:
             await bot.pin_chat_message(message.chat.id, card_msg.message_id, disable_notification=True)
         except Exception:
-            # молча: нет прав — ок
             pass
 
         await message.answer("✅ Встреча создана. Голосуйте в опросе 👇")
         return
 
-    if action == "edit":
-        event_id = data.get("event_id")
-        if not event_id:
-            await message.answer("Не вижу event_id для редактирования.")
-            return
-
+    # Сигнал от формы: редактирование прошло через API — обнови карточку + напоминания
+    if data.get("action") == "edited_via_api":
+        event_id = int(data.get("event_id"))
         async with aiosqlite.connect(DB_PATH) as db:
             cur = await db.execute(
-                "SELECT chat_id, card_message_id FROM events WHERE id=?",
-                (int(event_id),),
+                "SELECT chat_id, card_message_id, dt_iso, title, cost, location, details FROM events WHERE id=?",
+                (event_id,),
             )
             row = await cur.fetchone()
             await cur.close()
             if not row:
                 await message.answer("Событие не найдено.")
                 return
-            chat_id, card_message_id = row
 
-            # защита от редактирования “чужого чата”
-            if chat_id != message.chat.id:
-                await message.answer("Это событие относится к другому чату.")
-                return
+            chat_id, card_mid, dt_iso, title, cost, location, details = row
+            dt = datetime.fromisoformat(dt_iso).astimezone(TZ)
 
-            await db.execute(
-                "UPDATE events SET dt_iso=?, title=?, cost=?, location=?, details=? WHERE id=?",
-                (dt.isoformat(), title, cost, location, details, int(event_id)),
-            )
-            await create_or_replace_reminders(db, int(event_id), dt)
+            await create_or_replace_reminders(db, event_id, dt)
             await db.commit()
 
-        # обновим карточку
         try:
             await bot.edit_message_text(
-                chat_id=message.chat.id,
-                message_id=int(card_message_id),
+                chat_id=chat_id,
+                message_id=int(card_mid),
                 text=format_card(dt, title, cost, location, details),
                 parse_mode=ParseMode.MARKDOWN,
-                reply_markup=kb_event_actions(int(event_id)),
+                reply_markup=kb_event_actions(event_id),
             )
         except Exception:
             pass
 
-        await message.answer("✅ Изменения сохранены.")
+        await message.answer("✅ Обновил событие.")
         return
 
     await message.answer("Неизвестное действие формы.")
-
 
 @router.poll_answer()
 async def on_poll_answer(poll_answer: PollAnswer):
@@ -409,7 +413,6 @@ async def on_poll_answer(poll_answer: PollAnswer):
         option_id = int(poll_answer.option_ids[0])
 
     async with aiosqlite.connect(DB_PATH) as db:
-        # сохраняем только для известных poll_id
         cur = await db.execute("SELECT 1 FROM events WHERE poll_id=?", (poll_id,))
         ok = await cur.fetchone()
         await cur.close()
@@ -423,7 +426,6 @@ async def on_poll_answer(poll_answer: PollAnswer):
         )
         await db.commit()
 
-
 @router.callback_query(F.data.startswith("event:del:"))
 async def on_event_delete(cb: CallbackQuery, bot: Bot):
     event_id = int(cb.data.split(":")[-1])
@@ -436,9 +438,19 @@ async def on_event_delete(cb: CallbackQuery, bot: Bot):
         row = await cur.fetchone()
         await cur.close()
         if not row:
-            await cb.answer("Не нашёл событие")
+            await cb.answer("Не нашёл событие", show_alert=True)
             return
+
         chat_id, poll_msg_id, card_msg_id, poll_id = row
+
+        # Только создатель может удалить (минимальная защита)
+        cur2 = await db.execute("SELECT creator_user_id FROM events WHERE id=?", (event_id,))
+        r2 = await cur2.fetchone()
+        await cur2.close()
+        creator_user_id = r2[0] if r2 else None
+        if creator_user_id is not None and int(creator_user_id) != cb.from_user.id:
+            await cb.answer("Удалить может только создатель события.", show_alert=True)
+            return
 
         await db.execute("DELETE FROM reminders WHERE event_id=?", (event_id,))
         await db.execute("DELETE FROM votes WHERE poll_id=?", (poll_id,))
@@ -452,19 +464,21 @@ async def on_event_delete(cb: CallbackQuery, bot: Bot):
             except Exception:
                 pass
 
-    await cb.answer("Удалено")
-
+    await cb.answer("Удалено ✅")
 
 def make_ics(dt: datetime, title: str, location: str, description: str) -> str:
-    # В .ics удобнее хранить время в UTC
     dt_utc = dt.astimezone(ZoneInfo("UTC"))
-    dtend_utc = (dt + timedelta(hours=2)).astimezone(ZoneInfo("UTC"))  # длительность по умолчанию 2ч
-    uid = hashlib.sha1(f"{dt.isoformat()}|{title}|{location}".encode("utf-8")).hexdigest() + "@telegram-bot"
+    dtend_utc = (dt + timedelta(hours=2)).astimezone(ZoneInfo("UTC"))  # дефолт 2 часа
+
+    uid = hashlib.sha1(f"{dt.isoformat()}|{title}|{location}".encode("utf-8")).hexdigest() + "@telegram-meeting-bot"
 
     def fmt(d: datetime) -> str:
         return d.strftime("%Y%m%dT%H%M%SZ")
 
-    esc = lambda s: (s or "").replace("\\", "\\\\").replace("\n", "\\n").replace(",", "\\,").replace(";", "\\;")
+    def esc(s: str) -> str:
+        s = s or ""
+        return s.replace("\\", "\\\\").replace("\n", "\\n").replace(",", "\\,").replace(";", "\\;")
+
     return (
         "BEGIN:VCALENDAR\n"
         "VERSION:2.0\n"
@@ -496,14 +510,14 @@ async def on_event_ics(cb: CallbackQuery, bot: Bot):
         await cur.close()
 
     if not row:
-        await cb.answer("Событие не найдено")
+        await cb.answer("Событие не найдено", show_alert=True)
         return
 
     dt_iso, title, cost, location, details = row
     dt = datetime.fromisoformat(dt_iso).astimezone(TZ)
 
     description = f"Стоимость: {cost}"
-    if details.strip():
+    if (details or "").strip():
         description += f"\n\n{details.strip()}"
 
     ics_text = make_ics(dt, title, location, description)
@@ -511,17 +525,19 @@ async def on_event_ics(cb: CallbackQuery, bot: Bot):
     with open(filename, "w", encoding="utf-8") as f:
         f.write(ics_text)
 
-    # “Персонально” — отправляем в ответ пользователю (но это всё равно сообщение в чат).
-    # Если нужно строго в личку — пользователь должен сделать /start боту.
-    await bot.send_document(
-        chat_id=cb.message.chat.id,
-        document=FSInputFile(filename),
-        caption=f"📆 {user.full_name}, файл для добавления в календарь: **{title}**",
-        parse_mode=ParseMode.MARKDOWN
-    )
-
-    await cb.answer("Отправил .ics")
-
+    try:
+        await bot.send_document(
+            chat_id=user.id,  # ЛИЧКА
+            document=FSInputFile(filename),
+            caption=f"📆 **{title}**\n🕒 {dt.strftime('%Y-%m-%d %H:%M')} ({TZ.key})\n📍 {location}\n💸 {cost}",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        await cb.answer("Отправил в личку ✅")
+    except TelegramForbiddenError:
+        await cb.answer(
+            "Я не могу написать тебе в личку. Открой бота и нажми /start, затем повтори.",
+            show_alert=True
+        )
 
 async def main():
     await init_db()
@@ -536,3 +552,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
