@@ -19,6 +19,9 @@ from aiogram.types import (
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramForbiddenError
 
+from dotenv import load_dotenv
+load_dotenv()
+
 logging.basicConfig(level=logging.INFO)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
