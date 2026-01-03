@@ -1,0 +1,121 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto; padding: 16px; }
+    .row { margin: 12px 0; }
+    label { display:block; margin-bottom: 6px; font-weight: 600; }
+    input, textarea { width: 100%; padding: 10px; font-size: 16px; box-sizing: border-box; }
+    button { width: 100%; padding: 12px; font-size: 16px; margin-top: 10px; }
+    .muted { color: #666; font-size: 13px; margin-top: 6px; }
+  </style>
+</head>
+<body>
+  <h3 id="titleH">Новая встреча</h3>
+
+  <div class="row">
+    <label>Дата</label>
+    <input id="date" type="date"/>
+  </div>
+
+  <div class="row">
+    <label>Время</label>
+    <input id="time" type="time"/>
+  </div>
+
+  <div class="row">
+    <label>Название</label>
+    <input id="title" placeholder="например, Квиз"/>
+  </div>
+
+  <div class="row">
+    <label>Стоимость</label>
+    <input id="cost" placeholder="например, 10€"/>
+  </div>
+
+  <div class="row">
+    <label>Локация</label>
+    <input id="location" placeholder="например, Бар «Пингвин»"/>
+  </div>
+
+  <div class="row">
+    <label>Детали (опционально)</label>
+    <textarea id="details" rows="4" placeholder="как найтись, что взять и т.д."></textarea>
+  </div>
+
+  <button id="send">Сохранить</button>
+  <div class="muted" id="hint"></div>
+
+  <script>
+    const tg = window.Telegram.WebApp;
+    tg.ready();
+
+    const qs = new URLSearchParams(location.search);
+    const eventId = qs.get("event_id"); // если есть — режим редактирования
+    const apiBase = qs.get("api_base") || ""; // можно прокинуть api_base в URL, но обычно одинаковый домен
+
+    const h = document.getElementById("titleH");
+    const hint = document.getElementById("hint");
+
+    function setFromIso(dtIso) {
+      const dt = new Date(dtIso);
+      const yyyy = dt.getFullYear();
+      const mm = String(dt.getMonth() + 1).padStart(2, "0");
+      const dd = String(dt.getDate()).padStart(2, "0");
+      const hh = String(dt.getHours()).padStart(2, "0");
+      const mi = String(dt.getMinutes()).padStart(2, "0");
+      document.getElementById("date").value = `${yyyy}-${mm}-${dd}`;
+      document.getElementById("time").value = `${hh}:${mi}`;
+    }
+
+    async function loadEvent(id) {
+      h.textContent = "Редактирование встречи";
+      hint.textContent = "Форма подгружается…";
+      const resp = await fetch(`${apiBase}/api/event/${id}`);
+      if (!resp.ok) {
+        hint.textContent = "Не удалось загрузить событие.";
+        return;
+      }
+      const e = await resp.json();
+      setFromIso(e.dt_iso);
+      document.getElementById("title").value = e.title || "";
+      document.getElementById("cost").value = e.cost || "";
+      document.getElementById("location").value = e.location || "";
+      document.getElementById("details").value = e.details || "";
+      hint.textContent = "";
+    }
+
+    if (eventId) {
+      loadEvent(eventId).catch(() => hint.textContent = "Ошибка загрузки.");
+    }
+
+    document.getElementById("send").onclick = () => {
+      const date = document.getElementById("date").value;
+      const time = document.getElementById("time").value;
+      if (!date || !time) {
+        hint.textContent = "Нужны дата и время.";
+        return;
+      }
+
+      // В WebApp у нас нет часового пояса чата наверняка — проще отправить отдельно date+time,
+      // а TZ выставит бот. Но для удобства редактирования мы можем отправить готовую “локальную” строку.
+      const payload = {
+        action: eventId ? "edit" : "create",
+        event_id: eventId ? Number(eventId) : null,
+        date,
+        time,
+        title: document.getElementById("title").value,
+        cost: document.getElementById("cost").value,
+        location: document.getElementById("location").value,
+        details: document.getElementById("details").value
+      };
+
+      tg.sendData(JSON.stringify(payload));
+      tg.close();
+    };
+  </script>
+</body>
+</html>
