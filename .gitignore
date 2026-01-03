@@ -1,0 +1,25 @@
+# Secrets
+.env
+
+# DB
+*.sqlite3
+*.db
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+*.egg-info/
+.dist/
+.build/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
