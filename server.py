@@ -17,7 +17,7 @@ from pydantic import BaseModel
 from dotenv import load_dotenv
 load_dotenv()
 
-DB_PATH = "calendar_bot.sqlite3"
+DB_PATH = os.getenv("DB_PATH", "calendar_bot.sqlite3")
 TZ = ZoneInfo("Europe/Vilnius")
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -309,4 +309,3 @@ async def api_calendar_upcoming(
         ))
 
     return items
-

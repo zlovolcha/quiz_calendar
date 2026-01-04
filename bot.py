@@ -32,7 +32,7 @@ WEBAPP_URL = os.getenv("WEBAPP_URL", "https://bot01.ficsh.ru/event-form")
 MINIAPP_LINK = os.getenv("MINIAPP_LINK", "")
 
 TZ = ZoneInfo("Europe/Moscow")
-DB_PATH = "calendar_bot.sqlite3"
+DB_PATH = os.getenv("DB_PATH", "calendar_bot.sqlite3")
 
 OPTIONS = ["я в деле", "надо подумать", "точно не смогу"]
 OPT_YES, OPT_MAYBE, OPT_NO = 0, 1, 2
@@ -605,4 +605,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
