@@ -15,7 +15,7 @@ from aiogram.filters import Command
 from aiogram.types import (
     Message, PollAnswer,
     InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo, CallbackQuery,
-    FSInputFile
+    ReplyKeyboardMarkup, KeyboardButton, FSInputFile
 )
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramForbiddenError
@@ -23,12 +23,13 @@ from aiogram.exceptions import TelegramForbiddenError
 from dotenv import load_dotenv
 load_dotenv()
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, force=True)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise RuntimeError("Set BOT_TOKEN env var")
 
+BOT_USERNAME = os.getenv("BOT_USERNAME", "")
 WEBAPP_URL = os.getenv("WEBAPP_URL", "https://bot01.ficsh.ru/event-form")
 MINIAPP_LINK = os.getenv("MINIAPP_LINK", "")
 
@@ -104,18 +105,72 @@ def make_chat_sig(chat_id: int) -> str:
     full = hmac.new(key, msg, hashlib.sha256).hexdigest()
     return full[:20]
 
+def make_user_sig(chat_id: int, user_id: int) -> str:
+    key = hashlib.sha256(BOT_TOKEN.encode("utf-8")).digest()
+    msg = f"{chat_id}:{user_id}".encode("utf-8")
+    return hmac.new(key, msg, hashlib.sha256).hexdigest()
+
 def with_qs(url: str, params: dict) -> str:
     parsed = urlparse(url)
     query = dict(parse_qsl(parsed.query))
     query.update(params)
     return urlunparse(parsed._replace(query=urlencode(query)))
 
-def kb_new_event(chat_id: int):
+def start_payload(text: str) -> str:
+    if not text:
+        return ""
+    parts = text.strip().split(maxsplit=1)
+    return parts[1] if len(parts) > 1 else ""
+
+def parse_start_payload(payload: str):
+    if not payload:
+        return None, None, None
+    parts = payload.split("_", 2)
+    if len(parts) < 3:
+        return None, None, None
+    return parts[0], parts[1], parts[2]
+
+def start_link(username: str, payload: str) -> str:
+    return f"https://t.me/{username}?start={payload}"
+
+def kb_private_webapp(chat_id: int, sig: str, mode: str, user_id: int):
+    if not WEBAPP_URL:
+        return ReplyKeyboardMarkup(
+            keyboard=[[KeyboardButton(text="⚠️ WEBAPP_URL не настроен")]],
+            resize_keyboard=True,
+            one_time_keyboard=True,
+        )
+
+    params = {
+        "chat_id": chat_id,
+        "sig": sig,
+        "user_id": user_id,
+        "user_sig": make_user_sig(chat_id, user_id),
+    }
+    if mode == "calendar":
+        params["mode"] = "calendar"
+    url = with_qs(WEBAPP_URL, params)
+    label = "📅 Открыть календарь" if mode == "calendar" else "➕ Создать встречу (форма)"
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text=label, web_app=WebAppInfo(url=url))]],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
+
+def kb_new_event(chat_id: int, chat_type: str):
     sig = make_chat_sig(chat_id)
 
     if not WEBAPP_URL and not MINIAPP_LINK:
         return InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="⚠️ Mini App не настроен. Задай WEBAPP_URL", callback_data="noop")],
+            [InlineKeyboardButton(text="⚠️ Mini App не настроен. Задай WEBAPP_URL или MINIAPP_LINK", callback_data="noop")],
+        ])
+
+    if chat_type in ("group", "supergroup"):
+        create_link = f"{MINIAPP_LINK}?startapp=create_{chat_id}_{sig}"
+        calendar_link = f"{MINIAPP_LINK}?startapp=cal_{chat_id}_{sig}"
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="➕ Создать встречу (форма)", url=create_link)],
+            [InlineKeyboardButton(text="📅 Открыть календарь", url=calendar_link)],
         ])
 
     if WEBAPP_URL:
@@ -127,7 +182,6 @@ def kb_new_event(chat_id: int):
             [InlineKeyboardButton(text="📅 Открыть календарь", web_app=WebAppInfo(url=calendar_link))],
         ])
 
-    # fallback: startapp deep link
     create_link = f"{MINIAPP_LINK}?startapp=create_{chat_id}_{sig}"
     calendar_link = f"{MINIAPP_LINK}?startapp=cal_{chat_id}_{sig}"
 
@@ -139,38 +193,22 @@ def kb_new_event(chat_id: int):
 
 
 def kb_event_actions(event_id: int):
-    if WEBAPP_URL:
-        edit_url = with_qs(WEBAPP_URL, {"event_id": event_id})
-        return InlineKeyboardMarkup(inline_keyboard=[
-            [
-                InlineKeyboardButton(text="✏️ Редактировать", web_app=WebAppInfo(url=edit_url)),
-                InlineKeyboardButton(text="🗑 Удалить", callback_data=f"event:del:{event_id}"),
-            ],
-            [
-                InlineKeyboardButton(text="📆 Добавить в мой календарь", callback_data=f"event:ics:{event_id}"),
-            ],
-        ])
-
+    edit_url = None
     if MINIAPP_LINK:
         edit_url = f"{MINIAPP_LINK}?event_id={event_id}"
-        return InlineKeyboardMarkup(inline_keyboard=[
-            [
-                InlineKeyboardButton(text="✏️ Редактировать", url=edit_url),
-                InlineKeyboardButton(text="🗑 Удалить", callback_data=f"event:del:{event_id}"),
-            ],
-            [
-                InlineKeyboardButton(text="📆 Добавить в мой календарь", callback_data=f"event:ics:{event_id}"),
-            ],
-        ])
+    elif WEBAPP_URL:
+        edit_url = with_qs(WEBAPP_URL, {"event_id": event_id})
 
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [
+    rows = []
+    if edit_url:
+        rows.append([
+            InlineKeyboardButton(text="✏️ Редактировать", url=edit_url),
             InlineKeyboardButton(text="🗑 Удалить", callback_data=f"event:del:{event_id}"),
-        ],
-        [
-            InlineKeyboardButton(text="📆 Добавить в мой календарь", callback_data=f"event:ics:{event_id}"),
-        ],
-    ])
+        ])
+    else:
+        rows.append([InlineKeyboardButton(text="🗑 Удалить", callback_data=f"event:del:{event_id}")])
+    rows.append([InlineKeyboardButton(text="📆 Добавить в мой календарь", callback_data=f"event:ics:{event_id}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 async def init_db():
@@ -281,17 +319,59 @@ async def reminders_worker(bot: Bot):
 
 @router.message(Command("start"))
 async def cmd_start(message: Message):
+    payload = start_payload(message.text)
+    mode, chat_id, sig = parse_start_payload(payload)
+    if mode in ("create", "cal") and chat_id and sig:
+        try:
+            chat_id_int = int(chat_id)
+        except Exception:
+            await message.answer("Некорректный chat_id в ссылке.")
+            return
+        mode_name = "calendar" if mode == "cal" else "create"
+        await message.answer(
+            "Открой форму кнопкой ниже:",
+            reply_markup=kb_private_webapp(chat_id_int, sig, mode_name, message.from_user.id),
+        )
+        return
+
     await message.answer(
         "✅ Готово! Теперь я могу присылать тебе личные .ics-файлы.\n"
         "Вернись в чат и нажми «Добавить в мой календарь» под нужной встречей."
     )
 
 @router.message(Command("new"))
-async def cmd_new(message: Message):
+async def cmd_new(message: Message, bot: Bot):
     if message.chat.type not in ("group", "supergroup"):
         await message.answer("Команда работает в группах/супергруппах.")
         return
-    await message.answer("Управление встречами:", reply_markup=kb_new_event(message.chat.id))
+    logging.info(
+        "cmd_new: chat_id=%s webapp_url=%s miniapp_link=%s",
+        message.chat.id,
+        WEBAPP_URL,
+        MINIAPP_LINK,
+    )
+    try:
+        bot_username = BOT_USERNAME
+        if not bot_username:
+            me = await bot.get_me()
+            bot_username = me.username or ""
+        if not bot_username:
+            await message.answer("Не могу получить username бота для ссылки.")
+            return
+
+        sig = make_chat_sig(message.chat.id)
+        create_link = start_link(bot_username, f"create_{message.chat.id}_{sig}")
+        calendar_link = start_link(bot_username, f"cal_{message.chat.id}_{sig}")
+
+        await message.answer(
+            "Открой в личке и создай встречу:",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="➕ Создать встречу (в личке)", url=create_link)],
+                [InlineKeyboardButton(text="📅 Календарь (в личке)", url=calendar_link)],
+            ]),
+        )
+    except Exception:
+        logging.exception("cmd_new: failed to send keyboard")
 
 @router.message(F.web_app_data)
 async def on_webapp_data(message: Message, bot: Bot):

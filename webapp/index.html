@@ -5,21 +5,30 @@
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <style>
-    body { font-family: system-ui, -apple-system, Segoe UI, Roboto; padding: 16px; }
+    :root {
+      --bg: #ffffff;
+      --text: #000000;
+      --hint: #666666;
+      --card-bg: #ffffff;
+      --border: rgba(0,0,0,.18);
+      --button-bg: #ffffff;
+      --button-text: #000000;
+    }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto; padding: 16px; background: var(--bg); color: var(--text); }
     .row { margin: 12px 0; }
     label { display:block; margin-bottom: 6px; font-weight: 600; }
-    input, textarea { width: 100%; padding: 10px; font-size: 16px; box-sizing: border-box; }
-    button { width: 100%; padding: 12px; font-size: 16px; margin-top: 10px; }
-    .muted { color: #666; font-size: 13px; margin-top: 6px; }
-    .card { border: 1px solid rgba(0,0,0,.12); border-radius: 12px; padding: 12px; margin: 10px 0; }
+    input, textarea { width: 100%; padding: 10px; font-size: 16px; box-sizing: border-box; background: var(--card-bg); color: var(--text); border: 1px solid var(--border); }
+    button { width: 100%; padding: 12px; font-size: 16px; margin-top: 10px; background: var(--button-bg); color: var(--button-text); border: 1px solid var(--border); }
+    .muted { color: var(--hint); font-size: 13px; margin-top: 6px; }
+    .card { border: 1px solid var(--border); border-radius: 12px; padding: 12px; margin: 10px 0; background: var(--card-bg); }
     .title { font-weight: 700; font-size: 16px; margin-bottom: 6px; display:flex; align-items:center; flex-wrap:wrap; gap:8px; }
     .meta { font-size: 14px; line-height: 1.35; }
     .btnrow { display:flex; gap:8px; margin-top:10px; flex-wrap:wrap; }
-    .btn { flex: 1 1 140px; padding: 10px; border-radius: 10px; border: 1px solid rgba(0,0,0,.18); background: #fff; }
+    .btn { flex: 1 1 140px; padding: 10px; border-radius: 10px; border: 1px solid var(--border); background: var(--button-bg); color: var(--button-text); }
     .tabs { display:flex; gap:8px; margin: 10px 0 14px; }
-    .tab { flex:1; padding:10px; border-radius:10px; border:1px solid rgba(0,0,0,.18); background:#fff; }
+    .tab { flex:1; padding:10px; border-radius:10px; border:1px solid var(--border); background: var(--button-bg); color: var(--button-text); }
     .tab.active { font-weight:700; }
-    .badge { display:inline-block; font-size:12px; padding:2px 8px; border-radius:999px; border:1px solid rgba(0,0,0,.18); }
+    .badge { display:inline-block; font-size:12px; padding:2px 8px; border-radius:999px; border:1px solid var(--border); }
   </style>
 </head>
 <body>
@@ -108,6 +117,8 @@
     // chat context can come from query OR start_param
     const chatId = qs.get("chat_id") || spChatId;
     const sig = qs.get("sig") || spSig;
+    const userId = qs.get("user_id") || "";
+    const userSig = qs.get("user_sig") || "";
 
     // UI refs
     const titleH = $("titleH");
@@ -129,6 +140,36 @@
     const calHint = $("calHint");
     const list = $("list");
 
+    function applyTheme() {
+      if (!tg || !tg.themeParams) return;
+      const t = tg.themeParams;
+      const root = document.documentElement;
+      const set = (name, val) => { if (val) root.style.setProperty(name, val); };
+      set("--bg", t.bg_color);
+      set("--text", t.text_color);
+      set("--hint", t.hint_color);
+      set("--card-bg", t.section_bg_color || t.secondary_bg_color);
+      set("--border", t.section_separator_color);
+      set("--button-bg", t.button_color || t.section_bg_color);
+      set("--button-text", t.button_text_color || t.text_color);
+    }
+
+    function setTabsEnabled(enabled) {
+      tabGo.disabled = !enabled;
+      tabRevote.disabled = !enabled;
+    }
+
+    function warnNotWebApp(strict) {
+      if (!tg || !tg.initData || tg.initData.length === 0) {
+        const msg = "Это не Web App. Открой форму через кнопку бота в чате.";
+        hint.textContent = msg;
+        calHint.textContent = msg;
+        return !!strict;
+      }
+      return false;
+    }
+
+    applyTheme();
     // ---------- calendar ----------
     let allItems = [];
     let activeFilter = "all"; // all | go | revote
@@ -244,6 +285,12 @@
     }
 
     async function loadCalendar() {
+      const hasIdentity = !!(tg && tg.initData) || (!!userId && !!userSig);
+      warnNotWebApp(false);
+      setTabsEnabled(hasIdentity);
+      if (!hasIdentity) {
+        calHint.textContent = "Фильтры «Иду» и «Переголосовать» требуют идентификацию. Открой календарь через кнопку бота.";
+      }
       titleH.textContent = "Календарь встреч";
       modeCreateEdit.style.display = "none";
       modeCalendar.style.display = "block";
@@ -254,7 +301,10 @@
       }
 
       calHint.textContent = "Загружаю встречи…";
-      const url = `${apiBase}/api/calendar/upcoming?chat_id=${encodeURIComponent(chatId)}&sig=${encodeURIComponent(sig)}&limit=100`;
+      let url = `${apiBase}/api/calendar/upcoming?chat_id=${encodeURIComponent(chatId)}&sig=${encodeURIComponent(sig)}&limit=100`;
+      if (userId && userSig) {
+        url += `&user_id=${encodeURIComponent(userId)}&user_sig=${encodeURIComponent(userSig)}`;
+      }
       const resp = await fetch(url, { headers: { "X-Telegram-InitData": tg.initData } });
 
       if (!resp.ok) {
@@ -322,6 +372,7 @@
     }
 
     async function initForm() {
+      warnNotWebApp(true);
       titleH.textContent = eventId ? "Редактирование встречи" : "Новая встреча";
       modeCreateEdit.style.display = "block";
       modeCalendar.style.display = "none";
@@ -384,4 +435,3 @@
   </script>
 </body>
 </html>
-

@@ -23,3 +23,9 @@ Thumbs.db
 
 # Logs
 *.log
+
+# db and calendar_cards
+*-shm
+*-wal
+*.ics
+

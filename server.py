@@ -131,6 +131,11 @@ def _chat_sig_expected(chat_id: int) -> str:
     full = hmac.new(key, msg, hashlib.sha256).hexdigest()
     return full[:20]
 
+def _user_sig_expected(chat_id: int, user_id: int) -> str:
+    key = hashlib.sha256(BOT_TOKEN.encode("utf-8")).digest()
+    msg = f"{chat_id}:{user_id}".encode("utf-8")
+    return hmac.new(key, msg, hashlib.sha256).hexdigest()
+
 
 def verify_chat_sig(chat_id: int, sig: str):
     exp = _chat_sig_expected(chat_id)
@@ -248,17 +253,28 @@ async def api_calendar_upcoming(
     chat_id: int = Query(...),
     sig: str = Query(...),
     limit: int = Query(50, ge=1, le=200),
+    user_id: Optional[int] = Query(default=None),
+    user_sig: Optional[str] = Query(default=None),
     x_telegram_initdata: str = Header(default="", alias="X-Telegram-InitData"),
 ):
     """
     Возвращает ближайшие события + голос текущего пользователя (my_vote).
     Требует:
       - chat_id + sig (подпись от бота)
-      - initData (чтобы знать user.id)
+      - initData необязательно (если нет, my_vote будет пустой)
     """
     verify_chat_sig(chat_id, sig)
-    auth = telegram_webapp_verify_initdata(x_telegram_initdata)
-    user_id = int(auth["user"]["id"])
+    user_id_final = None
+    if x_telegram_initdata:
+        auth = telegram_webapp_verify_initdata(x_telegram_initdata)
+        user_id_final = int(auth["user"]["id"])
+    elif user_id is not None and user_sig:
+        expected = _user_sig_expected(chat_id, user_id)
+        if not hmac.compare_digest(expected, user_sig):
+            raise HTTPException(403, "bad user signature")
+        user_id_final = int(user_id)
+
+    user_id_param = user_id_final if user_id_final is not None else -1
 
     now_iso = datetime.now(tz=TZ).isoformat()
 
@@ -275,7 +291,7 @@ async def api_calendar_upcoming(
             ORDER BY e.dt_iso ASC
             LIMIT ?
             """,
-            (user_id, chat_id, now_iso, limit),
+            (user_id_param, chat_id, now_iso, limit),
         )
         rows = await cur.fetchall()
         await cur.close()
