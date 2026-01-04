@@ -4,6 +4,7 @@ import asyncio
 import logging
 import hashlib
 import hmac
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from typing import Optional, List
@@ -103,15 +104,30 @@ def make_chat_sig(chat_id: int) -> str:
     full = hmac.new(key, msg, hashlib.sha256).hexdigest()
     return full[:20]
 
+def with_qs(url: str, params: dict) -> str:
+    parsed = urlparse(url)
+    query = dict(parse_qsl(parsed.query))
+    query.update(params)
+    return urlunparse(parsed._replace(query=urlencode(query)))
+
 def kb_new_event(chat_id: int):
     sig = make_chat_sig(chat_id)
 
-    if not MINIAPP_LINK:
+    if not WEBAPP_URL and not MINIAPP_LINK:
         return InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="⚠️ Mini App не настроен. Задай MINIAPP_LINK", callback_data="noop")],
+            [InlineKeyboardButton(text="⚠️ Mini App не настроен. Задай WEBAPP_URL", callback_data="noop")],
         ])
 
-    # ВАЖНО: параметры передаем через startapp, так Mini App получит их в tg.initDataUnsafe.start_param
+    if WEBAPP_URL:
+        create_link = with_qs(WEBAPP_URL, {"chat_id": chat_id, "sig": sig})
+        calendar_link = with_qs(WEBAPP_URL, {"mode": "calendar", "chat_id": chat_id, "sig": sig})
+
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="➕ Создать встречу (форма)", web_app=WebAppInfo(url=create_link))],
+            [InlineKeyboardButton(text="📅 Открыть календарь", web_app=WebAppInfo(url=calendar_link))],
+        ])
+
+    # fallback: startapp deep link
     create_link = f"{MINIAPP_LINK}?startapp=create_{chat_id}_{sig}"
     calendar_link = f"{MINIAPP_LINK}?startapp=cal_{chat_id}_{sig}"
 
@@ -123,14 +139,32 @@ def kb_new_event(chat_id: int):
 
 
 def kb_event_actions(event_id: int):
-    # редактирование открываем через мини-приложение (URL), чтобы работало в группе
-    edit_url = f"{WEBAPP_URL}?event_id={event_id}"
+    if WEBAPP_URL:
+        edit_url = with_qs(WEBAPP_URL, {"event_id": event_id})
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✏️ Редактировать", web_app=WebAppInfo(url=edit_url)),
+                InlineKeyboardButton(text="🗑 Удалить", callback_data=f"event:del:{event_id}"),
+            ],
+            [
+                InlineKeyboardButton(text="📆 Добавить в мой календарь", callback_data=f"event:ics:{event_id}"),
+            ],
+        ])
+
     if MINIAPP_LINK:
         edit_url = f"{MINIAPP_LINK}?event_id={event_id}"
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✏️ Редактировать", url=edit_url),
+                InlineKeyboardButton(text="🗑 Удалить", callback_data=f"event:del:{event_id}"),
+            ],
+            [
+                InlineKeyboardButton(text="📆 Добавить в мой календарь", callback_data=f"event:ics:{event_id}"),
+            ],
+        ])
 
     return InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="✏️ Редактировать", url=edit_url),
             InlineKeyboardButton(text="🗑 Удалить", callback_data=f"event:del:{event_id}"),
         ],
         [
@@ -270,11 +304,14 @@ async def on_webapp_data(message: Message, bot: Bot):
       - публикуем карточку + опрос именно в target_chat_id
     """
 
+    logging.info("web_app_data received from chat_id=%s user_id=%s", message.chat.id, message.from_user.id if message.from_user else None)
     try:
         data = json.loads(message.web_app_data.data)
     except Exception:
+        logging.exception("web_app_data parse error")
         await message.answer("Не смог прочитать данные 😕")
         return
+    logging.info("web_app_data payload: %s", data)
 
     # Запрос .ics из календаря (мини-приложение): отправляем .ics в личку
     if data.get("action") == "ics_request":
@@ -319,21 +356,25 @@ async def on_webapp_data(message: Message, bot: Bot):
 
     # Создание встречи из формы (Mini App)
     if data.get("action") == "create":
+        logging.info("web_app_data action=create")
         # 1) Достаём целевой чат и подпись
         target_chat_id = data.get("chat_id")
         sig = data.get("sig")
 
         if not target_chat_id or not sig:
+            logging.warning("missing chat_id/sig in payload: chat_id=%s sig=%s", target_chat_id, sig)
             await message.answer("Не вижу chat_id/sig. Открой форму кнопкой из нужного чата и попробуй ещё раз.")
             return
 
         try:
             target_chat_id = int(target_chat_id)
         except Exception:
+            logging.warning("invalid chat_id in payload: %s", target_chat_id)
             await message.answer("Некорректный chat_id. Открой форму кнопкой из нужного чата.")
             return
 
         if make_chat_sig(target_chat_id) != str(sig):
+            logging.warning("bad chat signature for chat_id=%s", target_chat_id)
             await message.answer("Подпись не совпала. Открой форму кнопкой из нужного чата и попробуй ещё раз.")
             return
 
@@ -346,16 +387,19 @@ async def on_webapp_data(message: Message, bot: Bot):
         details = (data.get("details") or "").strip()
 
         if not date or not time:
+            logging.warning("missing date/time in payload: date=%s time=%s", date, time)
             await message.answer("Нужны дата и время.")
             return
 
         try:
             dt = datetime.strptime(f"{date} {time}", "%Y-%m-%d %H:%M").replace(tzinfo=TZ)
         except Exception:
+            logging.exception("bad date/time in payload: date=%s time=%s", date, time)
             await message.answer("Не понял дату/время. Проверь формат.")
             return
 
         if dt <= now_tz():
+            logging.warning("attempt to create event in the past: dt=%s", dt.isoformat())
             await message.answer("Похоже, это время уже в прошлом.")
             return
 
@@ -365,6 +409,7 @@ async def on_webapp_data(message: Message, bot: Bot):
             format_card(dt, title, cost, location, details),
             parse_mode=ParseMode.MARKDOWN
         )
+        logging.info("card message sent: chat_id=%s message_id=%s", target_chat_id, card_msg.message_id)
 
         # 4) Публикуем опрос в целевом чате
         poll_msg = await bot.send_poll(
@@ -374,6 +419,7 @@ async def on_webapp_data(message: Message, bot: Bot):
             is_anonymous=False,
             allows_multiple_answers=False,
         )
+        logging.info("poll sent: chat_id=%s poll_id=%s message_id=%s", target_chat_id, poll_msg.poll.id, poll_msg.message_id)
 
         # 5) Сохраняем в БД и планируем напоминания
         async with aiosqlite.connect(DB_PATH) as db:
@@ -420,6 +466,7 @@ async def on_webapp_data(message: Message, bot: Bot):
 
             await create_or_replace_reminders(db, event_id, dt)
             await db.commit()
+        logging.info("event saved: event_id=%s chat_id=%s", event_id, target_chat_id)
 
         # 6) Добавляем кнопки управления на карточку
         try:
