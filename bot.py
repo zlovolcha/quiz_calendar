@@ -28,9 +28,10 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise RuntimeError("Set BOT_TOKEN env var")
 
-WEBAPP_URL = os.getenv("WEBAPP_URL", "http://localhost:8000/event-form")
+WEBAPP_URL = os.getenv("WEBAPP_URL", "https://bot01.ficsh.ru/event-form")
+MINIAPP_LINK = os.getenv("MINIAPP_LINK", "")
 
-TZ = ZoneInfo("Europe/Vilnius")
+TZ = ZoneInfo("Europe/Moscow")
 DB_PATH = "calendar_bot.sqlite3"
 
 OPTIONS = ["я в деле", "надо подумать", "точно не смогу"]
@@ -104,23 +105,39 @@ def make_chat_sig(chat_id: int) -> str:
 
 def kb_new_event(chat_id: int):
     sig = make_chat_sig(chat_id)
-    cal_url = f"{WEBAPP_URL}?mode=calendar&chat_id={chat_id}&sig={sig}"
+
+    if not MINIAPP_LINK:
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⚠️ Mini App не настроен. Задай MINIAPP_LINK", callback_data="noop")],
+        ])
+
+    # ВАЖНО: параметры передаем через startapp, так Mini App получит их в tg.initDataUnsafe.start_param
+    create_link = f"{MINIAPP_LINK}?startapp=create_{chat_id}_{sig}"
+    calendar_link = f"{MINIAPP_LINK}?startapp=cal_{chat_id}_{sig}"
+
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="➕ Создать встречу (форма)", web_app=WebAppInfo(url=WEBAPP_URL))],
-        [InlineKeyboardButton(text="📅 Открыть календарь (мини-приложение)", web_app=WebAppInfo(url=cal_url))],
+        [InlineKeyboardButton(text="➕ Создать встречу (форма)", url=create_link)],
+        [InlineKeyboardButton(text="📅 Открыть календарь", url=calendar_link)],
     ])
 
+
+
 def kb_event_actions(event_id: int):
+    # редактирование открываем через мини-приложение (URL), чтобы работало в группе
     edit_url = f"{WEBAPP_URL}?event_id={event_id}"
+    if MINIAPP_LINK:
+        edit_url = f"{MINIAPP_LINK}?event_id={event_id}"
+
     return InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="✏️ Редактировать", web_app=WebAppInfo(url=edit_url)),
+            InlineKeyboardButton(text="✏️ Редактировать", url=edit_url),
             InlineKeyboardButton(text="🗑 Удалить", callback_data=f"event:del:{event_id}"),
         ],
         [
             InlineKeyboardButton(text="📆 Добавить в мой календарь", callback_data=f"event:ics:{event_id}"),
         ],
     ])
+
 
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
@@ -244,9 +261,14 @@ async def cmd_new(message: Message):
 
 @router.message(F.web_app_data)
 async def on_webapp_data(message: Message, bot: Bot):
-    if message.chat.type not in ("group", "supergroup"):
-        await message.answer("Работает в группах/супергруппах.")
-        return
+    """
+    WebAppData может прийти НЕ из группы (если Mini App открыто по ссылке t.me/<bot>/<app>).
+    Поэтому мы:
+      - читаем payload
+      - берём target_chat_id и sig из payload (или говорим пользователю открыть через кнопку в нужном чате)
+      - проверяем подпись (sig)
+      - публикуем карточку + опрос именно в target_chat_id
+    """
 
     try:
         data = json.loads(message.web_app_data.data)
@@ -254,89 +276,16 @@ async def on_webapp_data(message: Message, bot: Bot):
         await message.answer("Не смог прочитать данные 😕")
         return
 
-    # Запрос .ics из календаря mini app
+    # Запрос .ics из календаря (мини-приложение): отправляем .ics в личку
     if data.get("action") == "ics_request":
         event_id = int(data.get("event_id"))
-        # просто переиспользуем тот же обработчик, что и кнопка в чате:
         await _send_ics_to_user(bot, message.from_user.id, event_id, message)
         return
 
-    # Создание события
-    if data.get("action") == "create":
-        date = (data.get("date") or "").strip()
-        time = (data.get("time") or "").strip()
-        title = (data.get("title") or "Встреча").strip()
-        cost = (data.get("cost") or "-").strip()
-        location = (data.get("location") or "-").strip()
-        details = (data.get("details") or "").strip()
-
-        if not date or not time:
-            await message.answer("Нужны дата и время.")
-            return
-
-        dt = datetime.strptime(f"{date} {time}", "%Y-%m-%d %H:%M").replace(tzinfo=TZ)
-        if dt <= now_tz():
-            await message.answer("Похоже, это время уже в прошлом.")
-            return
-
-        card_msg = await bot.send_message(
-            message.chat.id,
-            format_card(dt, title, cost, location, details),
-            parse_mode=ParseMode.MARKDOWN
-        )
-
-        poll_msg = await bot.send_poll(
-            chat_id=message.chat.id,
-            question=f"{title} — {dt.strftime('%Y-%m-%d %H:%M')}",
-            options=OPTIONS,
-            is_anonymous=False,
-            allows_multiple_answers=False,
-        )
-
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute(
-                "INSERT INTO events(chat_id, poll_id, poll_message_id, card_message_id, creator_user_id, dt_iso, title, cost, location, details, created_at_iso) "
-                "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    message.chat.id,
-                    poll_msg.poll.id,
-                    poll_msg.message_id,
-                    card_msg.message_id,
-                    message.from_user.id if message.from_user else None,
-                    dt.isoformat(),
-                    title,
-                    cost,
-                    location,
-                    details,
-                    now_tz().isoformat(),
-                ),
-            )
-            cur = await db.execute("SELECT id FROM events WHERE poll_id=?", (poll_msg.poll.id,))
-            row = await cur.fetchone()
-            await cur.close()
-            event_id = row[0]
-
-            await create_or_replace_reminders(db, event_id, dt)
-            await db.commit()
-
-        await bot.edit_message_reply_markup(
-            chat_id=message.chat.id,
-            message_id=card_msg.message_id,
-            reply_markup=kb_event_actions(event_id),
-        )
-
-        # автозакреп
-        try:
-            await bot.pin_chat_message(message.chat.id, card_msg.message_id, disable_notification=True)
-        except Exception:
-            pass
-
-        await message.answer("✅ Встреча создана. Голосуйте в опросе 👇")
-        return
-
-    # Сигнал: редактирование прошло через API — обнови карточку и напоминания
+    # После редактирования через API просто обновляем карточку в чате
     if data.get("action") == "edited_via_api":
         event_id = int(data.get("event_id"))
+
         async with aiosqlite.connect(DB_PATH) as db:
             cur = await db.execute(
                 "SELECT chat_id, card_message_id, dt_iso, title, cost, location, details FROM events WHERE id=?",
@@ -368,7 +317,132 @@ async def on_webapp_data(message: Message, bot: Bot):
         await message.answer("✅ Обновил событие.")
         return
 
+    # Создание встречи из формы (Mini App)
+    if data.get("action") == "create":
+        # 1) Достаём целевой чат и подпись
+        target_chat_id = data.get("chat_id")
+        sig = data.get("sig")
+
+        if not target_chat_id or not sig:
+            await message.answer("Не вижу chat_id/sig. Открой форму кнопкой из нужного чата и попробуй ещё раз.")
+            return
+
+        try:
+            target_chat_id = int(target_chat_id)
+        except Exception:
+            await message.answer("Некорректный chat_id. Открой форму кнопкой из нужного чата.")
+            return
+
+        if make_chat_sig(target_chat_id) != str(sig):
+            await message.answer("Подпись не совпала. Открой форму кнопкой из нужного чата и попробуй ещё раз.")
+            return
+
+        # 2) Достаём поля формы
+        date = (data.get("date") or "").strip()
+        time = (data.get("time") or "").strip()
+        title = (data.get("title") or "Встреча").strip()
+        cost = (data.get("cost") or "-").strip()
+        location = (data.get("location") or "-").strip()
+        details = (data.get("details") or "").strip()
+
+        if not date or not time:
+            await message.answer("Нужны дата и время.")
+            return
+
+        try:
+            dt = datetime.strptime(f"{date} {time}", "%Y-%m-%d %H:%M").replace(tzinfo=TZ)
+        except Exception:
+            await message.answer("Не понял дату/время. Проверь формат.")
+            return
+
+        if dt <= now_tz():
+            await message.answer("Похоже, это время уже в прошлом.")
+            return
+
+        # 3) Публикуем карточку в целевом чате
+        card_msg = await bot.send_message(
+            target_chat_id,
+            format_card(dt, title, cost, location, details),
+            parse_mode=ParseMode.MARKDOWN
+        )
+
+        # 4) Публикуем опрос в целевом чате
+        poll_msg = await bot.send_poll(
+            chat_id=target_chat_id,
+            question=f"{title} — {dt.strftime('%Y-%m-%d %H:%M')}",
+            options=OPTIONS,
+            is_anonymous=False,
+            allows_multiple_answers=False,
+        )
+
+        # 5) Сохраняем в БД и планируем напоминания
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                """
+                INSERT INTO events(
+                    chat_id,
+                    poll_id,
+                    poll_message_id,
+                    card_message_id,
+                    creator_user_id,
+                    dt_iso,
+                    title,
+                    cost,
+                    location,
+                    details,
+                    created_at_iso
+                )
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    target_chat_id,
+                    poll_msg.poll.id,
+                    poll_msg.message_id,
+                    card_msg.message_id,
+                    message.from_user.id if message.from_user else None,
+                    dt.isoformat(),
+                    title,
+                    cost,
+                    location,
+                    details,
+                    now_tz().isoformat(),
+                ),
+            )
+
+            cur = await db.execute(
+                "SELECT id FROM events WHERE poll_id=?",
+                (poll_msg.poll.id,)
+            )
+            row = await cur.fetchone()
+            await cur.close()
+
+            event_id = row[0]
+
+            await create_or_replace_reminders(db, event_id, dt)
+            await db.commit()
+
+        # 6) Добавляем кнопки управления на карточку
+        try:
+            await bot.edit_message_reply_markup(
+                chat_id=target_chat_id,
+                message_id=card_msg.message_id,
+                reply_markup=kb_event_actions(event_id),
+            )
+        except Exception:
+            pass
+
+        # 7) Автозакреп карточки
+        try:
+            await bot.pin_chat_message(target_chat_id, card_msg.message_id, disable_notification=True)
+        except Exception:
+            pass
+
+        # 8) Сообщение пользователю (в том чате, где он открыл mini app)
+        await message.answer("✅ Встреча создана. Опрос отправлен в чат 👇")
+        return
+
     await message.answer("Неизвестное действие.")
+
 
 @router.poll_answer()
 async def on_poll_answer(poll_answer: PollAnswer):
@@ -512,7 +586,14 @@ async def on_event_ics(cb: CallbackQuery, bot: Bot):
 
 async def main():
     await init_db()
-    bot = Bot(token=BOT_TOKEN, parse_mode=ParseMode.MARKDOWN)
+
+    from aiogram.client.default import DefaultBotProperties
+
+    bot = Bot(
+        token=BOT_TOKEN,
+        default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN)
+    )
+
     dp = Dispatcher()
     dp.include_router(router)
 
@@ -521,5 +602,7 @@ async def main():
     logging.info("Bot started")
     await dp.start_polling(bot)
 
+
 if __name__ == "__main__":
     asyncio.run(main())
+

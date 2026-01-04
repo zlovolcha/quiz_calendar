@@ -12,19 +12,20 @@
     button { width: 100%; padding: 12px; font-size: 16px; margin-top: 10px; }
     .muted { color: #666; font-size: 13px; margin-top: 6px; }
     .card { border: 1px solid rgba(0,0,0,.12); border-radius: 12px; padding: 12px; margin: 10px 0; }
-    .title { font-weight: 700; font-size: 16px; margin-bottom: 6px; }
+    .title { font-weight: 700; font-size: 16px; margin-bottom: 6px; display:flex; align-items:center; flex-wrap:wrap; gap:8px; }
     .meta { font-size: 14px; line-height: 1.35; }
     .btnrow { display:flex; gap:8px; margin-top:10px; flex-wrap:wrap; }
     .btn { flex: 1 1 140px; padding: 10px; border-radius: 10px; border: 1px solid rgba(0,0,0,.18); background: #fff; }
     .tabs { display:flex; gap:8px; margin: 10px 0 14px; }
     .tab { flex:1; padding:10px; border-radius:10px; border:1px solid rgba(0,0,0,.18); background:#fff; }
     .tab.active { font-weight:700; }
-    .badge { display:inline-block; font-size:12px; padding:2px 8px; border-radius:999px; border:1px solid rgba(0,0,0,.18); margin-left:8px; }
+    .badge { display:inline-block; font-size:12px; padding:2px 8px; border-radius:999px; border:1px solid rgba(0,0,0,.18); }
   </style>
 </head>
 <body>
   <h3 id="titleH">Новая встреча</h3>
 
+  <!-- CREATE/EDIT FORM -->
   <div id="modeCreateEdit">
     <div class="row">
       <label>Дата</label>
@@ -43,7 +44,7 @@
 
     <div class="row">
       <label>Стоимость</label>
-      <input id="cost" placeholder="например, 10€"/>
+      <input id="cost" placeholder="например, 800 руб"/>
     </div>
 
     <div class="row">
@@ -60,6 +61,7 @@
     <div class="muted" id="hint"></div>
   </div>
 
+  <!-- CALENDAR -->
   <div id="modeCalendar" style="display:none">
     <div class="tabs">
       <button class="tab active" id="tabAll">Все</button>
@@ -74,27 +76,60 @@
     const tg = window.Telegram.WebApp;
     tg.ready();
 
+    function $(id) { return document.getElementById(id); }
+
+    // querystring (может быть пустой при открытии через t.me/<bot>/<app>)
     const qs = new URLSearchParams(location.search);
 
-    const mode = qs.get("mode") || "";          // "calendar" | ""
-    const eventId = qs.get("event_id");
+    // Telegram Mini App параметр запуска (передаётся через ?startapp=... в ссылке t.me)
+    const sp = (tg.initDataUnsafe && tg.initDataUnsafe.start_param)
+      ? String(tg.initDataUnsafe.start_param)
+      : "";
+
+    // startapp format from bot: cal_<chatid>_<sig>  OR  create_<chatid>_<sig>
+    let spMode = "";   // "cal" | "create"
+    let spChatId = "";
+    let spSig = "";
+
+    if (sp) {
+      const parts = sp.split("_");
+      if (parts.length >= 3) {
+        spMode = parts[0];
+        spChatId = parts[1];
+        spSig = parts.slice(2).join("_");
+      }
+    }
+
+    // mode can come from query (?mode=calendar) OR from start_param (cal)
+    const mode = qs.get("mode") || (spMode === "cal" ? "calendar" : "");
+    const eventId = qs.get("event_id") || "";
     const apiBase = qs.get("api_base") || "";
 
-    const chatId = qs.get("chat_id");
-    const sig = qs.get("sig");
+    // chat context can come from query OR start_param
+    const chatId = qs.get("chat_id") || spChatId;
+    const sig = qs.get("sig") || spSig;
 
-    const h = document.getElementById("titleH");
-    const hint = document.getElementById("hint");
+    // UI refs
+    const titleH = $("titleH");
+    const modeCreateEdit = $("modeCreateEdit");
+    const modeCalendar = $("modeCalendar");
+    const hint = $("hint");
 
-    const modeCreateEdit = document.getElementById("modeCreateEdit");
-    const modeCalendar = document.getElementById("modeCalendar");
-    const calHint = document.getElementById("calHint");
-    const list = document.getElementById("list");
+    const dateEl = $("date");
+    const timeEl = $("time");
+    const tEl = $("title");
+    const costEl = $("cost");
+    const locEl = $("location");
+    const detailsEl = $("details");
+    const sendBtn = $("send");
 
-    const tabAll = document.getElementById("tabAll");
-    const tabGo = document.getElementById("tabGo");
-    const tabRevote = document.getElementById("tabRevote");
+    const tabAll = $("tabAll");
+    const tabGo = $("tabGo");
+    const tabRevote = $("tabRevote");
+    const calHint = $("calHint");
+    const list = $("list");
 
+    // ---------- calendar ----------
     let allItems = [];
     let activeFilter = "all"; // all | go | revote
 
@@ -111,59 +146,6 @@
     tabGo.onclick = () => setActiveTab("go");
     tabRevote.onclick = () => setActiveTab("revote");
 
-    function setFromIso(dtIso) {
-      const dt = new Date(dtIso);
-      const yyyy = dt.getFullYear();
-      const mm = String(dt.getMonth() + 1).padStart(2, "0");
-      const dd = String(dt.getDate()).padStart(2, "0");
-      const hh = String(dt.getHours()).padStart(2, "0");
-      const mi = String(dt.getMinutes()).padStart(2, "0");
-      document.getElementById("date").value = `${yyyy}-${mm}-${dd}`;
-      document.getElementById("time").value = `${hh}:${mi}`;
-    }
-
-    async function loadEvent(id) {
-      h.textContent = "Редактирование встречи";
-      hint.textContent = "Форма подгружается…";
-      const resp = await fetch(`${apiBase}/api/event/${id}`);
-      if (!resp.ok) {
-        hint.textContent = "Не удалось загрузить событие.";
-        return;
-      }
-      const e = await resp.json();
-      setFromIso(e.dt_iso);
-      document.getElementById("title").value = e.title || "";
-      document.getElementById("cost").value = e.cost || "";
-      document.getElementById("location").value = e.location || "";
-      document.getElementById("details").value = e.details || "";
-      hint.textContent = "";
-    }
-
-    async function putEvent(id, patch) {
-      const resp = await fetch(`${apiBase}/api/event/${id}`, {
-        method: "PUT",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Telegram-InitData": tg.initData
-        },
-        body: JSON.stringify(patch)
-      });
-      if (!resp.ok) {
-        const t = await resp.text().catch(() => "");
-        throw new Error(`API error ${resp.status}: ${t}`);
-      }
-    }
-
-    function isoWithOffset(date, time) {
-      const local = new Date(`${date}T${time}:00`);
-      const tzOffsetMin = local.getTimezoneOffset();
-      const pad = (n) => String(Math.abs(n)).padStart(2, "0");
-      const sign = tzOffsetMin <= 0 ? "+" : "-";
-      const offH = pad(Math.floor(Math.abs(tzOffsetMin) / 60));
-      const offM = pad(Math.abs(tzOffsetMin) % 60);
-      return `${date}T${time}:00${sign}${offH}:${offM}`;
-    }
-
     function fmt(dtIso) {
       const d = new Date(dtIso);
       const yyyy = d.getFullYear();
@@ -174,11 +156,9 @@
       return `${yyyy}-${mm}-${dd} ${hh}:${mi}`;
     }
 
-    // "День события ещё не закончился" = событие в тот же календарный день или позже (по локали пользователя)
     function dayNotEnded(dtIso) {
       const d = new Date(dtIso);
       const now = new Date();
-      // сравниваем по YYYY-MM-DD
       const a = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
       const b = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,"0")}-${String(now.getDate()).padStart(2,"0")}`;
       return a >= b;
@@ -198,17 +178,8 @@
 
     function filteredItems() {
       if (activeFilter === "all") return allItems;
-
-      if (activeFilter === "go") {
-        // "иду" = my_vote yes и день события еще не закончился
-        return allItems.filter(it => it.my_vote === "yes" && dayNotEnded(it.dt_iso));
-      }
-
-      if (activeFilter === "revote") {
-        // "переголосовать" = my_vote maybe и событие еще не наступило
-        return allItems.filter(it => it.my_vote === "maybe" && eventNotStarted(it.dt_iso));
-      }
-
+      if (activeFilter === "go") return allItems.filter(it => it.my_vote === "yes" && dayNotEnded(it.dt_iso));
+      if (activeFilter === "revote") return allItems.filter(it => it.my_vote === "maybe" && eventNotStarted(it.dt_iso));
       return allItems;
     }
 
@@ -251,9 +222,7 @@
         btnOpen.className = "btn";
         btnOpen.textContent = it.poll_link ? "Открыть опрос" : "Открыть (нет ссылки)";
         btnOpen.disabled = !it.poll_link;
-        btnOpen.onclick = () => {
-          if (it.poll_link) tg.openTelegramLink(it.poll_link);
-        };
+        btnOpen.onclick = () => { if (it.poll_link) tg.openTelegramLink(it.poll_link); };
 
         const btnIcs = document.createElement("button");
         btnIcs.className = "btn";
@@ -263,19 +232,8 @@
           tg.close();
         };
 
-        const btnEdit = document.createElement("button");
-        btnEdit.className = "btn";
-        btnEdit.textContent = "Редактировать";
-        btnEdit.onclick = () => {
-          // Переходим на редактирование в той же форме
-          // Если у тебя /event-form, то лучше абсолютный путь:
-          // location.href = `/event-form?event_id=${it.id}`
-          location.href = `/event-form?event_id=${encodeURIComponent(it.id)}`;
-        };
-
         btnRow.appendChild(btnOpen);
         btnRow.appendChild(btnIcs);
-        btnRow.appendChild(btnEdit);
 
         div.appendChild(title);
         div.appendChild(meta);
@@ -286,21 +244,18 @@
     }
 
     async function loadCalendar() {
-      h.textContent = "Календарь встреч";
+      titleH.textContent = "Календарь встреч";
       modeCreateEdit.style.display = "none";
       modeCalendar.style.display = "block";
 
       if (!chatId || !sig) {
-        calHint.textContent = "Не переданы параметры чата (chat_id/sig). Открой календарь кнопкой из чата.";
+        calHint.textContent = "Не вижу параметры чата (chat_id/sig). Открой календарь кнопкой из нужного чата.";
         return;
       }
 
       calHint.textContent = "Загружаю встречи…";
-
       const url = `${apiBase}/api/calendar/upcoming?chat_id=${encodeURIComponent(chatId)}&sig=${encodeURIComponent(sig)}&limit=100`;
-      const resp = await fetch(url, {
-        headers: { "X-Telegram-InitData": tg.initData }
-      });
+      const resp = await fetch(url, { headers: { "X-Telegram-InitData": tg.initData } });
 
       if (!resp.ok) {
         calHint.textContent = "Не удалось загрузить встречи.";
@@ -308,57 +263,125 @@
       }
 
       allItems = await resp.json();
-      // по умолчанию "Все"
       setActiveTab("all");
     }
 
-    if (mode === "calendar") {
-      loadCalendar().catch(() => calHint.textContent = "Ошибка загрузки календаря.");
-    } else {
+    // ---------- form ----------
+    function isoWithOffset(date, time) {
+      const local = new Date(`${date}T${time}:00`);
+      const tzOffsetMin = local.getTimezoneOffset();
+      const pad = (n) => String(Math.abs(n)).padStart(2, "0");
+      const sign = tzOffsetMin <= 0 ? "+" : "-";
+      const offH = pad(Math.floor(Math.abs(tzOffsetMin) / 60));
+      const offM = pad(Math.abs(tzOffsetMin) % 60);
+      return `${date}T${time}:00${sign}${offH}:${offM}`;
+    }
+
+    function setFromIso(dtIso) {
+      const dt = new Date(dtIso);
+      const yyyy = dt.getFullYear();
+      const mm = String(dt.getMonth() + 1).padStart(2, "0");
+      const dd = String(dt.getDate()).padStart(2, "0");
+      const hh = String(dt.getHours()).padStart(2, "0");
+      const mi = String(dt.getMinutes()).padStart(2, "0");
+      dateEl.value = `${yyyy}-${mm}-${dd}`;
+      timeEl.value = `${hh}:${mi}`;
+    }
+
+    async function loadEvent(id) {
+      titleH.textContent = "Редактирование встречи";
+      hint.textContent = "Форма подгружается…";
+
+      const resp = await fetch(`${apiBase}/api/event/${id}`);
+      if (!resp.ok) {
+        hint.textContent = "Не удалось загрузить событие.";
+        return;
+      }
+      const e = await resp.json();
+      setFromIso(e.dt_iso);
+      tEl.value = e.title || "";
+      costEl.value = e.cost || "";
+      locEl.value = e.location || "";
+      detailsEl.value = e.details || "";
+      hint.textContent = "";
+    }
+
+    async function putEvent(id, patch) {
+      const resp = await fetch(`${apiBase}/api/event/${id}`, {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Telegram-InitData": tg.initData
+        },
+        body: JSON.stringify(patch)
+      });
+      if (!resp.ok) {
+        const t = await resp.text().catch(() => "");
+        throw new Error(`API error ${resp.status}: ${t}`);
+      }
+    }
+
+    async function initForm() {
+      titleH.textContent = eventId ? "Редактирование встречи" : "Новая встреча";
       modeCreateEdit.style.display = "block";
       modeCalendar.style.display = "none";
 
-      if (eventId) loadEvent(eventId).catch(() => hint.textContent = "Ошибка загрузки.");
+      if (eventId) {
+        try { await loadEvent(eventId); } catch (_) { hint.textContent = "Ошибка загрузки."; }
+      } else {
+        hint.textContent = "";
+      }
 
-      document.getElementById("send").onclick = async () => {
-        const date = document.getElementById("date").value;
-        const time = document.getElementById("time").value;
+      sendBtn.onclick = async () => {
+        const date = dateEl.value || "";
+        const time = timeEl.value || "";
+
         if (!date || !time) {
           hint.textContent = "Нужны дата и время.";
           return;
         }
 
-        const title = (document.getElementById("title").value || "Встреча").trim();
-        const cost = (document.getElementById("cost").value || "-").trim();
-        const locationVal = (document.getElementById("location").value || "-").trim();
-        const details = (document.getElementById("details").value || "").trim();
+        const title = (tEl.value || "Встреча").trim();
+        const cost = (costEl.value || "-").trim();
+        const location = (locEl.value || "-").trim();
+        const details = (detailsEl.value || "").trim();
 
+        // CREATE: отправляем данные боту, обязательно вместе с chat_id и sig
         if (!eventId) {
+          if (!chatId || !sig) {
+            hint.textContent = "Не вижу chat_id/sig. Открой форму кнопкой из нужного чата.";
+            return;
+          }
+
           tg.sendData(JSON.stringify({
             action: "create",
-            date, time,
-            title, cost, location: locationVal, details
+            chat_id: chatId,
+            sig: sig,
+            date, time, title, cost, location, details
           }));
           tg.close();
           return;
         }
 
+        // EDIT: сохраняем через API
         try {
           const dtIso = isoWithOffset(date, time);
-          await putEvent(eventId, {
-            dt_iso: dtIso,
-            title, cost,
-            location: locationVal,
-            details
-          });
-
-          tg.sendData(JSON.stringify({ action:"edited_via_api", event_id: Number(eventId) }));
+          await putEvent(eventId, { dt_iso: dtIso, title, cost, location, details });
+          tg.sendData(JSON.stringify({ action: "edited_via_api", event_id: Number(eventId) }));
           tg.close();
         } catch (e) {
           hint.textContent = "Не удалось сохранить: " + e.message;
         }
       };
     }
+
+    // ---------- router ----------
+    if (mode === "calendar") {
+      loadCalendar().catch(() => calHint.textContent = "Ошибка загрузки календаря.");
+    } else {
+      initForm().catch(() => hint.textContent = "Ошибка инициализации.");
+    }
   </script>
 </body>
 </html>
+

@@ -9,7 +9,7 @@ from typing import Optional, List
 
 import aiosqlite
 from fastapi import FastAPI, HTTPException, Header, Query
-app = FastAPI() //добавленная строка
+app = FastAPI() #//добавленная строка
 from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
