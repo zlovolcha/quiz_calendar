@@ -99,7 +99,7 @@ def now_tz() -> datetime:
 def format_card(dt: datetime, title: str, cost: str, location: str, details: str = "") -> str:
     text = (
         f"📅 **{title}**\n"
-        f"🕒 {dt.strftime('%Y-%m-%d %H:%M')} ({TZ.key})\n"
+        f"🕒 {dt.strftime('%Y-%m-%d %H:%M')}\n"
         f"📍 {location}\n"
         f"💸 {cost}"
     )
@@ -208,22 +208,7 @@ def kb_new_event(chat_id: int, chat_type: str):
 
 
 def kb_event_actions(event_id: int):
-    edit_url = None
-    if MINIAPP_LINK:
-        edit_url = f"{MINIAPP_LINK}?event_id={event_id}"
-    elif WEBAPP_URL:
-        edit_url = with_qs(WEBAPP_URL, {"event_id": event_id})
-
-    rows = []
-    if edit_url:
-        rows.append([
-            InlineKeyboardButton(text="✏️ Редактировать", url=edit_url),
-            InlineKeyboardButton(text="🗑 Удалить", callback_data=f"event:del:{event_id}"),
-        ])
-    else:
-        rows.append([InlineKeyboardButton(text="🗑 Удалить", callback_data=f"event:del:{event_id}")])
-    rows.append([InlineKeyboardButton(text="📆 Добавить в мой календарь", callback_data=f"event:ics:{event_id}")])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+    return None
 
 
 async def init_db():
@@ -327,7 +312,7 @@ async def reminders_worker(bot: Bot):
                                 f"⏳ До встречи осталось ~36 часов.\n{mentions}{more}\n"
                                 f"**Вы как?** Переголосуйте, пожалуйста 🙂\n\n"
                                 f"📅 **{title}**\n"
-                                f"🕒 {dt.strftime('%Y-%m-%d %H:%M')} ({TZ.key})\n"
+                                f"🕒 {dt.strftime('%Y-%m-%d %H:%M')}\n"
                                 f"📍 {location}\n"
                                 f"💸 {cost}"
                             )
@@ -348,7 +333,7 @@ async def reminders_worker(bot: Bot):
                             text = (
                                 f"🔔 Через ~3 часа встреча!\n{mentions}{more}\n\n"
                                 f"📅 **{title}**\n"
-                                f"🕒 {dt.strftime('%Y-%m-%d %H:%M')} ({TZ.key})\n"
+                                f"🕒 {dt.strftime('%Y-%m-%d %H:%M')}\n"
                                 f"📍 {location}\n"
                                 f"💸 {cost}"
                             )
@@ -508,8 +493,13 @@ async def on_webapp_data(message: Message, bot: Bot):
                 message_id=int(card_mid),
                 text=format_card(dt, title, cost, location, details),
                 parse_mode=ParseMode.MARKDOWN,
-                reply_markup=kb_event_actions(event_id),
+                reply_markup=None,
             )
+        except Exception:
+            pass
+
+        try:
+            await _send_ics_to_chat(bot, chat_id, event_id)
         except Exception:
             pass
 
@@ -641,7 +631,7 @@ async def on_webapp_data(message: Message, bot: Bot):
             await bot.edit_message_reply_markup(
                 chat_id=target_chat_id,
                 message_id=card_msg.message_id,
-                reply_markup=kb_event_actions(event_id),
+                reply_markup=None,
             )
         except Exception:
             pass
@@ -649,6 +639,12 @@ async def on_webapp_data(message: Message, bot: Bot):
         # 7) Автозакреп карточки
         try:
             await bot.pin_chat_message(target_chat_id, card_msg.message_id, disable_notification=True)
+        except Exception:
+            pass
+
+        # 7.1) Отправляем .ics в чат группы
+        try:
+            await _send_ics_to_chat(bot, target_chat_id, event_id)
         except Exception:
             pass
 
@@ -711,25 +707,26 @@ def make_ics(dt: datetime, title: str, location: str, description: str) -> str:
         s = s or ""
         return s.replace("\\", "\\\\").replace("\n", "\\n").replace(",", "\\,").replace(";", "\\;")
 
-    return (
-        "BEGIN:VCALENDAR\n"
-        "VERSION:2.0\n"
-        "METHOD:PUBLISH\n"
-        "PRODID:-//TelegramMeetingBot//EN\n"
-        "CALSCALE:GREGORIAN\n"
-        "BEGIN:VEVENT\n"
-        f"UID:{uid}\n"
-        f"DTSTAMP:{fmt(datetime.now(tz=ZoneInfo('UTC')))}\n"
-        f"DTSTART:{fmt(dt_utc)}\n"
-        f"DTEND:{fmt(dtend_utc)}\n"
-        f"SUMMARY:{esc(title)}\n"
-        f"LOCATION:{esc(location)}\n"
-        f"DESCRIPTION:{esc(description)}\n"
-        "END:VEVENT\n"
-        "END:VCALENDAR\n"
-    )
+    lines = [
+        "BEGIN:VCALENDAR",
+        "VERSION:2.0",
+        "METHOD:PUBLISH",
+        "PRODID:-//TelegramMeetingBot//EN",
+        "CALSCALE:GREGORIAN",
+        "BEGIN:VEVENT",
+        f"UID:{uid}",
+        f"DTSTAMP:{fmt(datetime.now(tz=ZoneInfo('UTC')))}",
+        f"DTSTART:{fmt(dt_utc)}",
+        f"DTEND:{fmt(dtend_utc)}",
+        f"SUMMARY:{esc(title)}",
+        f"LOCATION:{esc(location)}",
+        f"DESCRIPTION:{esc(description)}",
+        "END:VEVENT",
+        "END:VCALENDAR",
+    ]
+    return "\r\n".join(lines) + "\r\n"
 
-async def _send_ics_to_user(bot: Bot, user_id: int, event_id: int, context_message: Optional[Message] = None):
+async def _send_ics(bot: Bot, chat_id: int, event_id: int, caption: str, context_message: Optional[Message] = None):
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
             "SELECT dt_iso, title, cost, location, details FROM events WHERE id=?",
@@ -757,15 +754,9 @@ async def _send_ics_to_user(bot: Bot, user_id: int, event_id: int, context_messa
 
     try:
         await bot.send_document(
-            chat_id=user_id,
+            chat_id=chat_id,
             document=FSInputFile(filename),
-            caption=(
-                f"📆 **{title}**\n"
-                f"🕒 {dt.strftime('%Y-%m-%d %H:%M')} ({TZ.key})\n"
-                f"📍 {location}\n"
-                f"💸 {cost}\n\n"
-                "Открой файл и нажми «Добавить в календарь»."
-            ),
+            caption=caption,
             parse_mode=ParseMode.MARKDOWN
         )
     except TelegramForbiddenError:
@@ -774,6 +765,27 @@ async def _send_ics_to_user(bot: Bot, user_id: int, event_id: int, context_messa
         else:
             # если нет контекста — молча
             pass
+
+async def _send_ics_to_user(bot: Bot, user_id: int, event_id: int, context_message: Optional[Message] = None):
+    await _send_ics(
+        bot,
+        user_id,
+        event_id,
+        caption=(
+            "📎 Файл события для календаря.\n"
+            "Открой файл и нажми «Добавить в календарь»."
+        ),
+        context_message=context_message,
+    )
+
+async def _send_ics_to_chat(bot: Bot, chat_id: int, event_id: int):
+    await _send_ics(
+        bot,
+        chat_id,
+        event_id,
+        caption="📎 Файл события для календаря.",
+        context_message=None,
+    )
 
 @router.callback_query(F.data.startswith("event:ics:"))
 async def on_event_ics(cb: CallbackQuery, bot: Bot):
