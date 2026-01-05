@@ -710,8 +710,7 @@ def make_ics(dt: datetime, title: str, location: str, description: str) -> str:
     lines = [
         "BEGIN:VCALENDAR",
         "VERSION:2.0",
-        "METHOD:PUBLISH",
-        "PRODID:-//TelegramMeetingBot//EN",
+        "PRODID:-//YourApp//EN",
         "CALSCALE:GREGORIAN",
         "BEGIN:VEVENT",
         f"UID:{uid}",
@@ -719,7 +718,6 @@ def make_ics(dt: datetime, title: str, location: str, description: str) -> str:
         f"DTSTART:{fmt(dt_utc)}",
         f"DTEND:{fmt(dtend_utc)}",
         f"SUMMARY:{esc(title)}",
-        f"LOCATION:{esc(location)}",
         f"DESCRIPTION:{esc(description)}",
         "END:VEVENT",
         "END:VCALENDAR",
