@@ -710,6 +710,7 @@ def make_ics(dt: datetime, title: str, location: str, description: str) -> str:
     lines = [
         "BEGIN:VCALENDAR",
         "VERSION:2.0",
+        "METHOD:PUBLISH",
         "PRODID:-//YourApp//EN",
         "CALSCALE:GREGORIAN",
         "BEGIN:VEVENT",
