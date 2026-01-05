@@ -149,13 +149,21 @@
       const t = tg.themeParams;
       const root = document.documentElement;
       const set = (name, val) => { if (val) root.style.setProperty(name, val); };
-      set("--bg", t.bg_color);
-      set("--text", t.text_color);
+      const bg = t.bg_color;
+      const text = t.text_color;
+      const btnBg = t.button_color || t.section_bg_color;
+      const btnText = t.button_text_color || t.text_color;
+      set("--bg", bg);
+      if (!bg || !text || bg.toLowerCase() !== text.toLowerCase()) {
+        set("--text", text);
+      }
       set("--hint", t.hint_color);
       set("--card-bg", t.section_bg_color || t.secondary_bg_color);
       set("--border", t.section_separator_color);
-      set("--button-bg", t.button_color || t.section_bg_color);
-      set("--button-text", t.button_text_color || t.text_color);
+      set("--button-bg", btnBg);
+      if (!btnBg || !btnText || btnBg.toLowerCase() !== btnText.toLowerCase()) {
+        set("--button-text", btnText);
+      }
     }
 
     function setTabsEnabled(enabled) {
