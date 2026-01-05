@@ -3,14 +3,14 @@ import json
 import hmac
 import hashlib
 import urllib.parse
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from typing import Optional, List
 
 import aiosqlite
 from fastapi import FastAPI, HTTPException, Header, Query
 app = FastAPI() #//добавленная строка
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -149,6 +149,38 @@ def verify_chat_sig(chat_id: int, sig: str):
     exp = _chat_sig_expected(chat_id)
     if not sig or not hmac.compare_digest(exp, sig):
         raise HTTPException(403, "bad signature")
+
+def make_ics(dt: datetime, title: str, location: str, description: str) -> str:
+    dt_utc = dt.astimezone(ZoneInfo("UTC"))
+    dtend_utc = (dt + timedelta(hours=2)).astimezone(ZoneInfo("UTC"))
+
+    uid = hashlib.sha1(f"{dt.isoformat()}|{title}|{location}".encode("utf-8")).hexdigest() + "@telegram-meeting-bot"
+
+    def fmt(d: datetime) -> str:
+        return d.strftime("%Y%m%dT%H%M%SZ")
+
+    def esc(s: str) -> str:
+        s = s or ""
+        return s.replace("\\", "\\\\").replace("\n", "\\n").replace(",", "\\,").replace(";", "\\;")
+
+    lines = [
+        "BEGIN:VCALENDAR",
+        "VERSION:2.0",
+        "METHOD:PUBLISH",
+        "PRODID:-//YourApp//EN",
+        "CALSCALE:GREGORIAN",
+        "BEGIN:VEVENT",
+        f"UID:{uid}",
+        f"DTSTAMP:{fmt(datetime.now(tz=ZoneInfo('UTC')))}",
+        f"DTSTART:{fmt(dt_utc)}",
+        f"DTEND:{fmt(dtend_utc)}",
+        f"SUMMARY:{esc(title)}",
+        f"LOCATION:{esc(location)}",
+        f"DESCRIPTION:{esc(description)}",
+        "END:VEVENT",
+        "END:VCALENDAR",
+    ]
+    return "\r\n".join(lines) + "\r\n"
 
 
 class EventView(BaseModel):
@@ -395,3 +427,47 @@ async def api_calendar_upcoming(
         ))
 
     return items
+
+@app.get("/api/calendar/ics")
+async def api_calendar_ics(
+    event_id: int = Query(...),
+    user_id: Optional[int] = Query(default=None),
+    user_sig: Optional[str] = Query(default=None),
+    x_telegram_initdata: str = Header(default="", alias="X-Telegram-InitData"),
+):
+    user_id_final = None
+    if x_telegram_initdata:
+        auth = telegram_webapp_verify_initdata(x_telegram_initdata)
+        user_id_final = int(auth["user"]["id"])
+    elif user_id is not None and user_sig:
+        user_id_final = int(user_id)
+    else:
+        raise HTTPException(401, "Missing initData or user signature")
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "SELECT chat_id, dt_iso, title, cost, location, details FROM events WHERE id=?",
+            (event_id,),
+        )
+        row = await cur.fetchone()
+        await cur.close()
+
+    if not row:
+        raise HTTPException(404, "event not found")
+
+    chat_id, dt_iso, title, cost, location, details = row
+
+    if x_telegram_initdata == "" and user_sig:
+        expected = _user_sig_expected(int(chat_id), int(user_id_final))
+        if not hmac.compare_digest(expected, user_sig):
+            raise HTTPException(403, "bad user signature")
+
+    dt = datetime.fromisoformat(dt_iso).astimezone(TZ)
+    description = f"Стоимость: {cost}"
+    if (details or "").strip():
+        description += f"\n\n{details.strip()}"
+
+    ics_text = make_ics(dt, title, location, description)
+    filename = f"event_{event_id}.ics"
+    headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
+    return Response(content=ics_text, media_type="text/calendar; charset=utf-8", headers=headers)

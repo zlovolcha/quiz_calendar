@@ -32,6 +32,7 @@ if not BOT_TOKEN:
 BOT_USERNAME = os.getenv("BOT_USERNAME", "")
 WEBAPP_URL = os.getenv("WEBAPP_URL", "https://bot01.ficsh.ru/event-form")
 MINIAPP_LINK = os.getenv("MINIAPP_LINK", "")
+API_BASE_URL = os.getenv("API_BASE_URL", "")
 
 TZ = ZoneInfo("Europe/Moscow")
 DB_PATH = os.getenv("DB_PATH", "calendar_bot.sqlite3")
@@ -123,6 +124,15 @@ def with_qs(url: str, params: dict) -> str:
     query = dict(parse_qsl(parsed.query))
     query.update(params)
     return urlunparse(parsed._replace(query=urlencode(query)))
+
+def api_base_url() -> str:
+    if API_BASE_URL:
+        return API_BASE_URL.rstrip("/")
+    if WEBAPP_URL:
+        parsed = urlparse(WEBAPP_URL)
+        if parsed.scheme and parsed.netloc:
+            return urlunparse((parsed.scheme, parsed.netloc, "", "", "", "")).rstrip("/")
+    return ""
 
 def start_payload(text: str) -> str:
     if not text:
@@ -726,10 +736,17 @@ def make_ics(dt: datetime, title: str, location: str, description: str) -> str:
     ]
     return "\r\n".join(lines) + "\r\n"
 
-async def _send_ics(bot: Bot, chat_id: int, event_id: int, caption: str, context_message: Optional[Message] = None):
+async def _send_ics(
+    bot: Bot,
+    chat_id: int,
+    event_id: int,
+    caption: str,
+    context_message: Optional[Message] = None,
+    user_id: Optional[int] = None,
+):
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
-            "SELECT dt_iso, title, cost, location, details FROM events WHERE id=?",
+            "SELECT chat_id, dt_iso, title, cost, location, details FROM events WHERE id=?",
             (event_id,),
         )
         row = await cur.fetchone()
@@ -740,12 +757,27 @@ async def _send_ics(bot: Bot, chat_id: int, event_id: int, caption: str, context
             await context_message.answer("Событие не найдено.")
         return
 
-    dt_iso, title, cost, location, details = row
+    event_chat_id, dt_iso, title, cost, location, details = row
     dt = datetime.fromisoformat(dt_iso).astimezone(TZ)
 
     description = f"Стоимость: {cost}"
     if (details or "").strip():
         description += f"\n\n{details.strip()}"
+
+    ics_link = ""
+    api_base = api_base_url()
+    if api_base and user_id is not None:
+        user_sig = make_user_sig(int(event_chat_id), int(user_id))
+        ics_link = (
+            f"{api_base}/api/calendar/ics"
+            f"?event_id={event_id}&user_id={user_id}&user_sig={user_sig}"
+        )
+
+    if ics_link:
+        caption += (
+            "\n\nЕсли iPhone не открывает файл, попробуйте "
+            f"[ссылку для скачивания]({ics_link})."
+        )
 
     ics_text = make_ics(dt, title, location, description)
     filename = f"event_{event_id}.ics"
@@ -776,6 +808,7 @@ async def _send_ics_to_user(bot: Bot, user_id: int, event_id: int, context_messa
             "Открой файл и нажми «Добавить в календарь»."
         ),
         context_message=context_message,
+        user_id=user_id,
     )
 
 async def _send_ics_to_chat(bot: Bot, chat_id: int, event_id: int):
