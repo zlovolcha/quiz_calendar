@@ -765,6 +765,7 @@ async def _send_ics(
         description += f"\n\n{details.strip()}"
 
     ics_link = ""
+    webcal_link = ""
     api_base = api_base_url()
     if api_base and user_id is not None:
         user_sig = make_user_sig(int(event_chat_id), int(user_id))
@@ -772,12 +773,18 @@ async def _send_ics(
             f"{api_base}/api/calendar/ics"
             f"?event_id={event_id}&user_id={user_id}&user_sig={user_sig}"
         )
+        if ics_link.startswith("https://"):
+            webcal_link = "webcal://" + ics_link[len("https://"):]
+        elif ics_link.startswith("http://"):
+            webcal_link = "webcal://" + ics_link[len("http://"):]
 
     if ics_link:
         caption += (
             "\n\nЕсли iPhone не открывает файл, попробуйте "
             f"[ссылку для скачивания]({ics_link})."
         )
+    if webcal_link:
+        caption += f"\nИли откройте [webcal-ссылку]({webcal_link})."
 
     ics_text = make_ics(dt, title, location, description)
     filename = f"event_{event_id}.ics"

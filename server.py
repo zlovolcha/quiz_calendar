@@ -470,4 +470,8 @@ async def api_calendar_ics(
     ics_text = make_ics(dt, title, location, description)
     filename = f"event_{event_id}.ics"
     headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
-    return Response(content=ics_text, media_type="text/calendar; charset=utf-8", headers=headers)
+    return Response(
+        content=ics_text,
+        media_type="text/calendar; charset=utf-8; method=PUBLISH",
+        headers=headers,
+    )
