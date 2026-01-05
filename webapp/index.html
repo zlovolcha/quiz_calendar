@@ -36,6 +36,7 @@
 
   <!-- CREATE/EDIT FORM -->
   <div id="modeCreateEdit">
+    <button id="backBtn" style="display:none">← Назад к списку</button>
     <div class="row">
       <label>Дата</label>
       <input id="date" type="date"/>
@@ -72,7 +73,7 @@
 
   <!-- CALENDAR -->
   <div id="modeCalendar" style="display:none">
-    <div class="tabs">
+    <div class="tabs" id="tabs">
       <button class="tab active" id="tabAll">Все</button>
       <button class="tab" id="tabGo">Иду</button>
       <button class="tab" id="tabRevote">Переголосовать</button>
@@ -110,8 +111,9 @@
     }
 
     // mode can come from query (?mode=calendar) OR from start_param (cal)
-    const mode = qs.get("mode") || (spMode === "cal" ? "calendar" : "");
+    const mode = qs.get("mode") || (spMode === "cal" ? "calendar" : (spMode === "manage" ? "manage" : ""));
     const eventId = qs.get("event_id") || "";
+    const backMode = qs.get("back") || "";
     const apiBase = qs.get("api_base") || "";
 
     // chat context can come from query OR start_param
@@ -133,10 +135,12 @@
     const locEl = $("location");
     const detailsEl = $("details");
     const sendBtn = $("send");
+    const backBtn = $("backBtn");
 
     const tabAll = $("tabAll");
     const tabGo = $("tabGo");
     const tabRevote = $("tabRevote");
+    const tabsEl = $("tabs");
     const calHint = $("calHint");
     const list = $("list");
 
@@ -224,6 +228,39 @@
       return allItems;
     }
 
+    function appUrl(params) {
+      const base = `${location.origin}${location.pathname}`;
+      const url = new URL(base);
+      Object.entries(params).forEach(([k, v]) => {
+        if (v !== undefined && v !== null && v !== "") url.searchParams.set(k, v);
+      });
+      return url.toString();
+    }
+
+    async function deleteEvent(id) {
+      const ok = confirm("Удалить встречу? Это действие нельзя отменить.");
+      if (!ok) return;
+      if (mode !== "manage" && tg && tg.sendData) {
+        tg.sendData(JSON.stringify({ action: "delete", event_id: id }));
+        tg.close();
+        return;
+      }
+      let url = `${apiBase}/api/event/${id}`;
+      if (userId && userSig) {
+        url += `?user_id=${encodeURIComponent(userId)}&user_sig=${encodeURIComponent(userSig)}`;
+      }
+      const resp = await fetch(url, {
+        method: "DELETE",
+        headers: { "X-Telegram-InitData": tg.initData }
+      });
+      if (!resp.ok) {
+        const t = await resp.text().catch(() => "");
+        alert("Не удалось удалить: " + t);
+        return;
+      }
+      await loadCalendar();
+    }
+
     function renderList() {
       const items = filteredItems();
       list.innerHTML = "";
@@ -259,22 +296,46 @@
         const btnRow = document.createElement("div");
         btnRow.className = "btnrow";
 
-        const btnOpen = document.createElement("button");
-        btnOpen.className = "btn";
-        btnOpen.textContent = it.poll_link ? "Открыть опрос" : "Открыть (нет ссылки)";
-        btnOpen.disabled = !it.poll_link;
-        btnOpen.onclick = () => { if (it.poll_link) tg.openTelegramLink(it.poll_link); };
+        if (mode === "manage") {
+          const editUrl = appUrl({
+            event_id: it.id,
+            chat_id: chatId,
+            sig: sig,
+            user_id: userId,
+            user_sig: userSig,
+            back: "manage"
+          });
 
-        const btnIcs = document.createElement("button");
-        btnIcs.className = "btn";
-        btnIcs.textContent = "Добавить в мой календарь";
-        btnIcs.onclick = () => {
-          tg.sendData(JSON.stringify({ action: "ics_request", event_id: it.id }));
-          tg.close();
-        };
+          const btnEdit = document.createElement("button");
+          btnEdit.className = "btn";
+          btnEdit.textContent = "Редактировать";
+          btnEdit.onclick = () => { location.href = editUrl; };
 
-        btnRow.appendChild(btnOpen);
-        btnRow.appendChild(btnIcs);
+          const btnDel = document.createElement("button");
+          btnDel.className = "btn";
+          btnDel.textContent = "Удалить";
+          btnDel.onclick = () => { deleteEvent(it.id); };
+
+          btnRow.appendChild(btnEdit);
+          btnRow.appendChild(btnDel);
+        } else {
+          const btnOpen = document.createElement("button");
+          btnOpen.className = "btn";
+          btnOpen.textContent = it.poll_link ? "Открыть опрос" : "Открыть (нет ссылки)";
+          btnOpen.disabled = !it.poll_link;
+          btnOpen.onclick = () => { if (it.poll_link) tg.openTelegramLink(it.poll_link); };
+
+          const btnIcs = document.createElement("button");
+          btnIcs.className = "btn";
+          btnIcs.textContent = "Добавить в мой календарь";
+          btnIcs.onclick = () => {
+            tg.sendData(JSON.stringify({ action: "ics_request", event_id: it.id }));
+            tg.close();
+          };
+
+          btnRow.appendChild(btnOpen);
+          btnRow.appendChild(btnIcs);
+        }
 
         div.appendChild(title);
         div.appendChild(meta);
@@ -287,11 +348,12 @@
     async function loadCalendar() {
       const hasIdentity = !!(tg && tg.initData) || (!!userId && !!userSig);
       warnNotWebApp(false);
-      setTabsEnabled(hasIdentity);
+      setTabsEnabled(hasIdentity && mode !== "manage");
+      tabsEl.style.display = mode === "manage" ? "none" : "flex";
       if (!hasIdentity) {
         calHint.textContent = "Фильтры «Иду» и «Переголосовать» требуют идентификацию. Открой календарь через кнопку бота.";
       }
-      titleH.textContent = "Календарь встреч";
+      titleH.textContent = mode === "manage" ? "Управление встречами" : "Календарь встреч";
       modeCreateEdit.style.display = "none";
       modeCalendar.style.display = "block";
 
@@ -357,7 +419,11 @@
     }
 
     async function putEvent(id, patch) {
-      const resp = await fetch(`${apiBase}/api/event/${id}`, {
+      let url = `${apiBase}/api/event/${id}`;
+      if (userId && userSig) {
+        url += `?user_id=${encodeURIComponent(userId)}&user_sig=${encodeURIComponent(userSig)}`;
+      }
+      const resp = await fetch(url, {
         method: "PUT",
         headers: {
           "Content-Type": "application/json",
@@ -376,6 +442,19 @@
       titleH.textContent = eventId ? "Редактирование встречи" : "Новая встреча";
       modeCreateEdit.style.display = "block";
       modeCalendar.style.display = "none";
+      if (eventId && (backMode === "manage" || mode === "manage")) {
+        backBtn.style.display = "block";
+        backBtn.onclick = () => {
+          const backUrl = appUrl({
+            mode: "manage",
+            chat_id: chatId,
+            sig: sig,
+            user_id: userId,
+            user_sig: userSig
+          });
+          location.href = backUrl;
+        };
+      }
 
       if (eventId) {
         try { await loadEvent(eventId); } catch (_) { hint.textContent = "Ошибка загрузки."; }
@@ -419,7 +498,18 @@
           const dtIso = isoWithOffset(date, time);
           await putEvent(eventId, { dt_iso: dtIso, title, cost, location, details });
           tg.sendData(JSON.stringify({ action: "edited_via_api", event_id: Number(eventId) }));
-          tg.close();
+          if (backMode === "manage") {
+            const backUrl = appUrl({
+              mode: "manage",
+              chat_id: chatId,
+              sig: sig,
+              user_id: userId,
+              user_sig: userSig
+            });
+            location.href = backUrl;
+          } else {
+            tg.close();
+          }
         } catch (e) {
           hint.textContent = "Не удалось сохранить: " + e.message;
         }
@@ -427,7 +517,7 @@
     }
 
     // ---------- router ----------
-    if (mode === "calendar") {
+    if (mode === "calendar" || mode === "manage") {
       loadCalendar().catch(() => calHint.textContent = "Ошибка загрузки календаря.");
     } else {
       initForm().catch(() => hint.textContent = "Ошибка инициализации.");

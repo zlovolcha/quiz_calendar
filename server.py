@@ -71,6 +71,14 @@ CREATE TABLE IF NOT EXISTS reminders (
   FOREIGN KEY(event_id) REFERENCES events(id)
 );
 
+CREATE TABLE IF NOT EXISTS users (
+  user_id INTEGER PRIMARY KEY,
+  username TEXT,
+  first_name TEXT,
+  last_name TEXT,
+  updated_at_iso TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_events_chat_dt ON events(chat_id, dt_iso);
 CREATE INDEX IF NOT EXISTS idx_votes_poll_user ON votes(poll_id, user_id);
 """
@@ -209,10 +217,16 @@ async def api_get_event(event_id: int):
 async def api_update_event(
     event_id: int,
     patch: EventPatch,
+    user_id: Optional[int] = Query(default=None),
+    user_sig: Optional[str] = Query(default=None),
     x_telegram_initdata: str = Header(default="", alias="X-Telegram-InitData"),
 ):
-    auth = telegram_webapp_verify_initdata(x_telegram_initdata)
-    user_id = int(auth["user"]["id"])
+    user_id_final = None
+    if x_telegram_initdata:
+        auth = telegram_webapp_verify_initdata(x_telegram_initdata)
+        user_id_final = int(auth["user"]["id"])
+    elif user_id is not None and user_sig:
+        user_id_final = int(user_id)
 
     try:
         dt = datetime.fromisoformat(patch.dt_iso)
@@ -223,7 +237,7 @@ async def api_update_event(
 
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
-            "SELECT creator_user_id FROM events WHERE id=?",
+            "SELECT creator_user_id, chat_id FROM events WHERE id=?",
             (event_id,),
         )
         row = await cur.fetchone()
@@ -232,11 +246,19 @@ async def api_update_event(
         if not row:
             raise HTTPException(404, "event not found")
 
-        creator_user_id = row[0]
+        creator_user_id, chat_id = row
         if creator_user_id is None:
             raise HTTPException(403, "not allowed")
 
-        if int(creator_user_id) != user_id:
+        if user_id_final is None:
+            raise HTTPException(401, "Missing initData or user signature")
+
+        if x_telegram_initdata == "" and user_sig:
+            expected = _user_sig_expected(int(chat_id), int(user_id_final))
+            if not hmac.compare_digest(expected, user_sig):
+                raise HTTPException(403, "bad user signature")
+
+        if int(creator_user_id) != int(user_id_final):
             raise HTTPException(403, "not allowed")
 
         await db.execute(
@@ -247,6 +269,54 @@ async def api_update_event(
 
     return {"ok": True}
 
+
+@app.delete("/api/event/{event_id}")
+async def api_delete_event(
+    event_id: int,
+    user_id: Optional[int] = Query(default=None),
+    user_sig: Optional[str] = Query(default=None),
+    x_telegram_initdata: str = Header(default="", alias="X-Telegram-InitData"),
+):
+    user_id_final = None
+    if x_telegram_initdata:
+        auth = telegram_webapp_verify_initdata(x_telegram_initdata)
+        user_id_final = int(auth["user"]["id"])
+    elif user_id is not None and user_sig:
+        user_id_final = int(user_id)
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "SELECT creator_user_id, chat_id, poll_id FROM events WHERE id=?",
+            (event_id,),
+        )
+        row = await cur.fetchone()
+        await cur.close()
+
+        if not row:
+            raise HTTPException(404, "event not found")
+
+        creator_user_id, chat_id, poll_id = row
+        if creator_user_id is None:
+            raise HTTPException(403, "not allowed")
+
+        if user_id_final is None:
+            raise HTTPException(401, "Missing initData or user signature")
+
+        if x_telegram_initdata == "" and user_sig:
+            expected = _user_sig_expected(int(chat_id), int(user_id_final))
+            if not hmac.compare_digest(expected, user_sig):
+                raise HTTPException(403, "bad user signature")
+
+        if int(creator_user_id) != int(user_id_final):
+            raise HTTPException(403, "not allowed")
+
+        await db.execute("DELETE FROM reminders WHERE event_id=?", (event_id,))
+        if poll_id:
+            await db.execute("DELETE FROM votes WHERE poll_id=?", (poll_id,))
+        await db.execute("DELETE FROM events WHERE id=?", (event_id,))
+        await db.commit()
+
+    return {"ok": True}
 
 @app.get("/api/calendar/upcoming", response_model=List[CalendarItem])
 async def api_calendar_upcoming(

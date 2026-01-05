@@ -81,6 +81,14 @@ CREATE TABLE IF NOT EXISTS reminders (
   FOREIGN KEY(event_id) REFERENCES events(id)
 );
 
+CREATE TABLE IF NOT EXISTS users (
+  user_id INTEGER PRIMARY KEY,
+  username TEXT,
+  first_name TEXT,
+  last_name TEXT,
+  updated_at_iso TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_events_chat_dt ON events(chat_id, dt_iso);
 CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders(sent, run_at_iso);
 """
@@ -149,8 +157,15 @@ def kb_private_webapp(chat_id: int, sig: str, mode: str, user_id: int):
     }
     if mode == "calendar":
         params["mode"] = "calendar"
+    elif mode == "manage":
+        params["mode"] = "manage"
     url = with_qs(WEBAPP_URL, params)
-    label = "📅 Открыть календарь" if mode == "calendar" else "➕ Создать встречу (форма)"
+    if mode == "calendar":
+        label = "📅 Открыть календарь"
+    elif mode == "manage":
+        label = "🛠 Управление встречами"
+    else:
+        label = "➕ Создать встречу (форма)"
     return ReplyKeyboardMarkup(
         keyboard=[[KeyboardButton(text=label, web_app=WebAppInfo(url=url))]],
         resize_keyboard=True,
@@ -247,17 +262,33 @@ async def mark_reminder_sent(db, reminder_id: int):
         (now_tz().isoformat(), reminder_id),
     )
 
-async def get_user_ids_by_choice(db, poll_id: str, option_id: int) -> List[int]:
+async def get_users_by_choice(db, poll_id: str, option_id: int):
     cur = await db.execute(
-        "SELECT user_id FROM votes WHERE poll_id=? AND option_id=?",
+        """
+        SELECT v.user_id, u.username, u.first_name, u.last_name
+        FROM votes v
+        LEFT JOIN users u ON u.user_id = v.user_id
+        WHERE v.poll_id=? AND v.option_id=?
+        """,
         (poll_id, option_id),
     )
     rows = await cur.fetchall()
     await cur.close()
-    return [r[0] for r in rows]
+    return rows
+
+def md_escape(text: str) -> str:
+    for ch in ("\\", "*", "_", "[", "]", "(", ")"):
+        text = text.replace(ch, f"\\{ch}")
+    return text
+
+def display_name(username: Optional[str], first_name: Optional[str], last_name: Optional[str]) -> str:
+    if username:
+        return f"@{username}"
+    name = " ".join(p for p in [first_name, last_name] if p)
+    return name.strip() or "user"
 
 def mention(uid: int, name: str = "user") -> str:
-    return f"[{name}](tg://user?id={uid})"
+    return f"[{md_escape(name)}](tg://user?id={uid})"
 
 async def reminders_worker(bot: Bot):
     while True:
@@ -285,20 +316,35 @@ async def reminders_worker(bot: Bot):
                         poll_link = f"https://t.me/c/{internal}/{poll_msg_id}"
 
                     if kind == REM_36H:
-                        user_ids = await get_user_ids_by_choice(db, poll_id, OPT_MAYBE)
-                        if user_ids:
-                            mentions = ", ".join(mention(uid) for uid in user_ids[:30])
-                            more = f" …и ещё {len(user_ids)-30}" if len(user_ids) > 30 else ""
-                            text = f"⏳ До встречи осталось ~36 часов.\n{mentions}{more}\n**Вы как?** Переголосуйте, пожалуйста 🙂"
+                        users = await get_users_by_choice(db, poll_id, OPT_MAYBE)
+                        if users:
+                            mentions = ", ".join(
+                                mention(uid, display_name(username, first_name, last_name))
+                                for uid, username, first_name, last_name in users[:30]
+                            )
+                            more = f" …и ещё {len(users)-30}" if len(users) > 30 else ""
+                            text = (
+                                f"⏳ До встречи осталось ~36 часов.\n{mentions}{more}\n"
+                                f"**Вы как?** Переголосуйте, пожалуйста 🙂\n\n"
+                                f"📅 **{title}**\n"
+                                f"🕒 {dt.strftime('%Y-%m-%d %H:%M')} ({TZ.key})\n"
+                                f"📍 {location}\n"
+                                f"💸 {cost}"
+                            )
+                            if (details or "").strip():
+                                text += f"\n\n📝 {details.strip()}"
                             if poll_link:
                                 text += f"\n\nОпрос: {poll_link}"
                             await bot.send_message(chat_id, text, parse_mode=ParseMode.MARKDOWN)
 
                     elif kind == REM_3H:
-                        user_ids = await get_user_ids_by_choice(db, poll_id, OPT_YES)
-                        if user_ids:
-                            mentions = ", ".join(mention(uid) for uid in user_ids[:30])
-                            more = f" …и ещё {len(user_ids)-30}" if len(user_ids) > 30 else ""
+                        users = await get_users_by_choice(db, poll_id, OPT_YES)
+                        if users:
+                            mentions = ", ".join(
+                                mention(uid, display_name(username, first_name, last_name))
+                                for uid, username, first_name, last_name in users[:30]
+                            )
+                            more = f" …и ещё {len(users)-30}" if len(users) > 30 else ""
                             text = (
                                 f"🔔 Через ~3 часа встреча!\n{mentions}{more}\n\n"
                                 f"📅 **{title}**\n"
@@ -317,17 +363,51 @@ async def reminders_worker(bot: Bot):
             logging.exception("reminders_worker error")
         await asyncio.sleep(30)
 
+async def delete_event(bot: Bot, event_id: int, actor_user_id: int) -> str:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "SELECT chat_id, poll_message_id, card_message_id, poll_id, creator_user_id FROM events WHERE id=?",
+            (event_id,),
+        )
+        row = await cur.fetchone()
+        await cur.close()
+        if not row:
+            return "Событие не найдено."
+
+        chat_id, poll_msg_id, card_msg_id, poll_id, creator_user_id = row
+        if creator_user_id is not None and int(creator_user_id) != int(actor_user_id):
+            return "Удалить может только создатель события."
+
+        await db.execute("DELETE FROM reminders WHERE event_id=?", (event_id,))
+        await db.execute("DELETE FROM votes WHERE poll_id=?", (poll_id,))
+        await db.execute("DELETE FROM events WHERE id=?", (event_id,))
+        await db.commit()
+
+    for mid in [card_msg_id, poll_msg_id]:
+        if mid:
+            try:
+                await bot.delete_message(chat_id, int(mid))
+            except Exception:
+                pass
+
+    return "Удалено ✅"
+
 @router.message(Command("start"))
 async def cmd_start(message: Message):
     payload = start_payload(message.text)
     mode, chat_id, sig = parse_start_payload(payload)
-    if mode in ("create", "cal") and chat_id and sig:
+    if mode in ("create", "cal", "manage") and chat_id and sig:
         try:
             chat_id_int = int(chat_id)
         except Exception:
             await message.answer("Некорректный chat_id в ссылке.")
             return
-        mode_name = "calendar" if mode == "cal" else "create"
+        if mode == "cal":
+            mode_name = "calendar"
+        elif mode == "manage":
+            mode_name = "manage"
+        else:
+            mode_name = "create"
         await message.answer(
             "Открой форму кнопкой ниже:",
             reply_markup=kb_private_webapp(chat_id_int, sig, mode_name, message.from_user.id),
@@ -362,12 +442,14 @@ async def cmd_new(message: Message, bot: Bot):
         sig = make_chat_sig(message.chat.id)
         create_link = start_link(bot_username, f"create_{message.chat.id}_{sig}")
         calendar_link = start_link(bot_username, f"cal_{message.chat.id}_{sig}")
+        manage_link = start_link(bot_username, f"manage_{message.chat.id}_{sig}")
 
         await message.answer(
             "Открой в личке и создай встречу:",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="➕ Создать встречу (в личке)", url=create_link)],
-                [InlineKeyboardButton(text="📅 Календарь (в личке)", url=calendar_link)],
+                [InlineKeyboardButton(text="➕ Создать встречу", url=create_link)],
+                [InlineKeyboardButton(text="📅 Календарь", url=calendar_link)],
+                [InlineKeyboardButton(text="🛠 Управление встречами", url=manage_link)],
             ]),
         )
     except Exception:
@@ -432,6 +514,12 @@ async def on_webapp_data(message: Message, bot: Bot):
             pass
 
         await message.answer("✅ Обновил событие.")
+        return
+
+    if data.get("action") == "delete":
+        event_id = int(data.get("event_id"))
+        result = await delete_event(bot, event_id, message.from_user.id)
+        await message.answer(result)
         return
 
     # Создание встречи из формы (Mini App)
@@ -596,41 +684,19 @@ async def on_poll_answer(poll_answer: PollAnswer):
             "ON CONFLICT(poll_id, user_id) DO UPDATE SET option_id=excluded.option_id, updated_at_iso=excluded.updated_at_iso",
             (poll_id, user.id, option_id, now_tz().isoformat()),
         )
+        await db.execute(
+            "INSERT INTO users(user_id, username, first_name, last_name, updated_at_iso) VALUES(?, ?, ?, ?, ?) "
+            "ON CONFLICT(user_id) DO UPDATE SET username=excluded.username, first_name=excluded.first_name, "
+            "last_name=excluded.last_name, updated_at_iso=excluded.updated_at_iso",
+            (user.id, user.username, user.first_name, user.last_name, now_tz().isoformat()),
+        )
         await db.commit()
 
 @router.callback_query(F.data.startswith("event:del:"))
 async def on_event_delete(cb: CallbackQuery, bot: Bot):
     event_id = int(cb.data.split(":")[-1])
-
-    async with aiosqlite.connect(DB_PATH) as db:
-        cur = await db.execute(
-            "SELECT chat_id, poll_message_id, card_message_id, poll_id, creator_user_id FROM events WHERE id=?",
-            (event_id,),
-        )
-        row = await cur.fetchone()
-        await cur.close()
-        if not row:
-            await cb.answer("Не нашёл событие", show_alert=True)
-            return
-
-        chat_id, poll_msg_id, card_msg_id, poll_id, creator_user_id = row
-        if creator_user_id is not None and int(creator_user_id) != cb.from_user.id:
-            await cb.answer("Удалить может только создатель события.", show_alert=True)
-            return
-
-        await db.execute("DELETE FROM reminders WHERE event_id=?", (event_id,))
-        await db.execute("DELETE FROM votes WHERE poll_id=?", (poll_id,))
-        await db.execute("DELETE FROM events WHERE id=?", (event_id,))
-        await db.commit()
-
-    for mid in [card_msg_id, poll_msg_id]:
-        if mid:
-            try:
-                await bot.delete_message(chat_id, int(mid))
-            except Exception:
-                pass
-
-    await cb.answer("Удалено ✅")
+    result = await delete_event(bot, event_id, cb.from_user.id)
+    await cb.answer(result, show_alert=result != "Удалено ✅")
 
 def make_ics(dt: datetime, title: str, location: str, description: str) -> str:
     dt_utc = dt.astimezone(ZoneInfo("UTC"))
@@ -648,6 +714,7 @@ def make_ics(dt: datetime, title: str, location: str, description: str) -> str:
     return (
         "BEGIN:VCALENDAR\n"
         "VERSION:2.0\n"
+        "METHOD:PUBLISH\n"
         "PRODID:-//TelegramMeetingBot//EN\n"
         "CALSCALE:GREGORIAN\n"
         "BEGIN:VEVENT\n"
@@ -692,7 +759,13 @@ async def _send_ics_to_user(bot: Bot, user_id: int, event_id: int, context_messa
         await bot.send_document(
             chat_id=user_id,
             document=FSInputFile(filename),
-            caption=f"📆 **{title}**\n🕒 {dt.strftime('%Y-%m-%d %H:%M')} ({TZ.key})\n📍 {location}\n💸 {cost}",
+            caption=(
+                f"📆 **{title}**\n"
+                f"🕒 {dt.strftime('%Y-%m-%d %H:%M')} ({TZ.key})\n"
+                f"📍 {location}\n"
+                f"💸 {cost}\n\n"
+                "Открой файл и нажми «Добавить в календарь»."
+            ),
             parse_mode=ParseMode.MARKDOWN
         )
     except TelegramForbiddenError:
