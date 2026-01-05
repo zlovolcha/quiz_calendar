@@ -718,6 +718,7 @@ def make_ics(dt: datetime, title: str, location: str, description: str) -> str:
         f"DTSTART:{fmt(dt_utc)}",
         f"DTEND:{fmt(dtend_utc)}",
         f"SUMMARY:{esc(title)}",
+        f"LOCATION:{esc(location)}",
         f"DESCRIPTION:{esc(description)}",
         "END:VEVENT",
         "END:VCALENDAR",
