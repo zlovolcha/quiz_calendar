@@ -433,6 +433,7 @@ async def api_calendar_ics(
     event_id: int = Query(...),
     user_id: Optional[int] = Query(default=None),
     user_sig: Optional[str] = Query(default=None),
+    chat_sig: Optional[str] = Query(default=None),
     x_telegram_initdata: str = Header(default="", alias="X-Telegram-InitData"),
 ):
     user_id_final = None
@@ -441,6 +442,8 @@ async def api_calendar_ics(
         user_id_final = int(auth["user"]["id"])
     elif user_id is not None and user_sig:
         user_id_final = int(user_id)
+    elif chat_sig:
+        user_id_final = None
     else:
         raise HTTPException(401, "Missing initData or user signature")
 
@@ -461,6 +464,10 @@ async def api_calendar_ics(
         expected = _user_sig_expected(int(chat_id), int(user_id_final))
         if not hmac.compare_digest(expected, user_sig):
             raise HTTPException(403, "bad user signature")
+    elif x_telegram_initdata == "" and chat_sig:
+        expected = _chat_sig_expected(int(chat_id))
+        if not hmac.compare_digest(expected, chat_sig):
+            raise HTTPException(403, "bad chat signature")
 
     dt = datetime.fromisoformat(dt_iso).astimezone(TZ)
     description = f"Стоимость: {cost}"

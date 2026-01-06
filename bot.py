@@ -747,6 +747,7 @@ async def _send_ics(
     caption: str,
     context_message: Optional[Message] = None,
     user_id: Optional[int] = None,
+    allow_chat_link: bool = False,
 ):
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
@@ -771,12 +772,17 @@ async def _send_ics(
     ics_link = ""
     webcal_link = ""
     api_base = api_base_url()
-    if api_base and user_id is not None:
-        user_sig = make_user_sig(int(event_chat_id), int(user_id))
-        ics_link = (
-            f"{api_base}/api/calendar/ics"
-            f"?event_id={event_id}&user_id={user_id}&user_sig={user_sig}"
-        )
+    if api_base:
+        if user_id is not None:
+            user_sig = make_user_sig(int(event_chat_id), int(user_id))
+            ics_link = (
+                f"{api_base}/api/calendar/ics"
+                f"?event_id={event_id}&user_id={user_id}&user_sig={user_sig}"
+            )
+        elif allow_chat_link:
+            chat_sig = make_chat_sig(int(event_chat_id))
+            ics_link = f"{api_base}/api/calendar/ics?event_id={event_id}&chat_sig={chat_sig}"
+
         if ics_link.startswith("https://"):
             webcal_link = "webcal://" + ics_link[len("https://"):]
         elif ics_link.startswith("http://"):
@@ -827,8 +833,12 @@ async def _send_ics_to_chat(bot: Bot, chat_id: int, event_id: int):
         bot,
         chat_id,
         event_id,
-        caption="📎 Файл события для календаря.",
+        caption=(
+            "📎 Файл события для календаря.\n"
+            "Открой файл и нажми «Добавить в календарь»."
+        ),
         context_message=None,
+        allow_chat_link=True,
     )
 
 @router.callback_query(F.data.startswith("event:ics:"))
