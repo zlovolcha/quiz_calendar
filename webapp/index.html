@@ -144,6 +144,46 @@
     const calHint = $("calHint");
     const list = $("list");
 
+    function normalizeHex(c) {
+      if (!c) return "";
+      const v = String(c).trim().toLowerCase();
+      if (v[0] === "#" && v.length === 4) {
+        return "#" + v[1] + v[1] + v[2] + v[2] + v[3] + v[3];
+      }
+      return v;
+    }
+
+    function hexToRgb(c) {
+      if (!c || c[0] !== "#" || c.length !== 7) return null;
+      const n = parseInt(c.slice(1), 16);
+      return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 };
+    }
+
+    function relLuma(rgb) {
+      const chan = (v) => {
+        const s = v / 255;
+        return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
+      };
+      return 0.2126 * chan(rgb.r) + 0.7152 * chan(rgb.g) + 0.0722 * chan(rgb.b);
+    }
+
+    function contrast(a, b) {
+      const ra = hexToRgb(normalizeHex(a));
+      const rb = hexToRgb(normalizeHex(b));
+      if (!ra || !rb) return 0;
+      const la = relLuma(ra);
+      const lb = relLuma(rb);
+      const hi = Math.max(la, lb);
+      const lo = Math.min(la, lb);
+      return (hi + 0.05) / (lo + 0.05);
+    }
+
+    function isLight(c) {
+      const r = hexToRgb(normalizeHex(c));
+      if (!r) return true;
+      return relLuma(r) > 0.7;
+    }
+
     function applyTheme() {
       if (!tg || !tg.themeParams) return;
       const t = tg.themeParams;
@@ -154,15 +194,23 @@
       const btnBg = t.button_color || t.section_bg_color;
       const btnText = t.button_text_color || t.text_color;
       set("--bg", bg);
-      if (!bg || !text || bg.toLowerCase() !== text.toLowerCase()) {
-        set("--text", text);
+      if (text) {
+        if (contrast(bg, text) < 3) {
+          set("--text", isLight(bg) ? "#111111" : "#ffffff");
+        } else {
+          set("--text", text);
+        }
       }
       set("--hint", t.hint_color);
       set("--card-bg", t.section_bg_color || t.secondary_bg_color);
       set("--border", t.section_separator_color);
       set("--button-bg", btnBg);
-      if (!btnBg || !btnText || btnBg.toLowerCase() !== btnText.toLowerCase()) {
-        set("--button-text", btnText);
+      if (btnText) {
+        if (contrast(btnBg, btnText) < 3) {
+          set("--button-text", isLight(btnBg || bg) ? "#111111" : "#ffffff");
+        } else {
+          set("--button-text", btnText);
+        }
       }
     }
 

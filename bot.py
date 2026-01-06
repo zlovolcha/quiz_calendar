@@ -588,6 +588,10 @@ async def on_webapp_data(message: Message, bot: Bot):
             allows_multiple_answers=False,
         )
         logging.info("poll sent: chat_id=%s poll_id=%s message_id=%s", target_chat_id, poll_msg.poll.id, poll_msg.message_id)
+        try:
+            await bot.pin_chat_message(chat_id=target_chat_id, message_id=poll_msg.message_id)
+        except Exception:
+            logging.exception("failed to pin poll message: chat_id=%s message_id=%s", target_chat_id, poll_msg.message_id)
 
         # 5) Сохраняем в БД и планируем напоминания
         async with aiosqlite.connect(DB_PATH) as db:
