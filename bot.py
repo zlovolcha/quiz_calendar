@@ -117,6 +117,39 @@ def base_ics_caption() -> str:
         "Открой файл и нажми «Добавить в календарь»."
     )
 
+def ics_links(event_chat_id: int, event_id: int, user_id: Optional[int], allow_chat_link: bool):
+    ics_link = ""
+    webcal_link = ""
+    api_base = api_base_url()
+    if api_base:
+        if user_id is not None:
+            user_sig = make_user_sig(int(event_chat_id), int(user_id))
+            ics_link = (
+                f"{api_base}/api/calendar/ics"
+                f"?event_id={event_id}&user_id={user_id}&user_sig={user_sig}"
+            )
+        elif allow_chat_link:
+            chat_sig = make_chat_sig(int(event_chat_id))
+            ics_link = f"{api_base}/api/calendar/ics?event_id={event_id}&chat_sig={chat_sig}"
+
+        if ics_link.startswith("https://"):
+            webcal_link = "webcal://" + ics_link[len("https://"):]
+        elif ics_link.startswith("http://"):
+            webcal_link = "webcal://" + ics_link[len("http://"):]
+    return ics_link, webcal_link
+
+def full_ics_caption(base_caption: str, event_chat_id: int, event_id: int, user_id: Optional[int], allow_chat_link: bool) -> str:
+    caption = base_caption
+    ics_link, webcal_link = ics_links(event_chat_id, event_id, user_id, allow_chat_link)
+    if ics_link:
+        caption += (
+            "\n\nЕсли iPhone не открывает файл, попробуйте "
+            f"[ссылку для скачивания]({ics_link})."
+        )
+    if webcal_link:
+        caption += f"\nИли откройте [webcal-ссылку]({webcal_link})."
+    return caption
+
 def make_chat_sig(chat_id: int) -> str:
     key = hashlib.sha256(BOT_TOKEN.encode("utf-8")).digest()
     msg = str(chat_id).encode("utf-8")
@@ -527,9 +560,10 @@ async def on_webapp_data(message: Message, bot: Bot):
 
         try:
             filename = write_ics_file(event_id, dt, title, cost, location, details)
+            base_caption = f"{format_card(dt, title, cost, location, details)}\n\n{base_ics_caption()}"
             media = InputMediaDocument(
                 media=FSInputFile(filename),
-                caption=f"{format_card(dt, title, cost, location, details)}\n\n{base_ics_caption()}",
+                caption=full_ics_caption(base_caption, chat_id, event_id, None, True),
                 parse_mode=ParseMode.MARKDOWN,
             )
             await bot.edit_message_media(
@@ -815,32 +849,7 @@ async def _send_ics(
     event_chat_id, dt_iso, title, cost, location, details = row
     dt = datetime.fromisoformat(dt_iso).astimezone(TZ)
 
-    ics_link = ""
-    webcal_link = ""
-    api_base = api_base_url()
-    if api_base:
-        if user_id is not None:
-            user_sig = make_user_sig(int(event_chat_id), int(user_id))
-            ics_link = (
-                f"{api_base}/api/calendar/ics"
-                f"?event_id={event_id}&user_id={user_id}&user_sig={user_sig}"
-            )
-        elif allow_chat_link:
-            chat_sig = make_chat_sig(int(event_chat_id))
-            ics_link = f"{api_base}/api/calendar/ics?event_id={event_id}&chat_sig={chat_sig}"
-
-        if ics_link.startswith("https://"):
-            webcal_link = "webcal://" + ics_link[len("https://"):]
-        elif ics_link.startswith("http://"):
-            webcal_link = "webcal://" + ics_link[len("http://"):]
-
-    if ics_link:
-        caption += (
-            "\n\nЕсли iPhone не открывает файл, попробуйте "
-            f"[ссылку для скачивания]({ics_link})."
-        )
-    if webcal_link:
-        caption += f"\nИли откройте [webcal-ссылку]({webcal_link})."
+    caption = full_ics_caption(caption, event_chat_id, event_id, user_id, allow_chat_link)
 
     filename = write_ics_file(event_id, dt, title, cost, location, details)
 
