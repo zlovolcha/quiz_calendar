@@ -4,6 +4,7 @@ import asyncio
 import logging
 import hashlib
 import hmac
+import uuid
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -15,6 +16,7 @@ from aiogram.filters import Command
 from aiogram.types import (
     Message, PollAnswer,
     InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo, CallbackQuery,
+    InputMediaDocument,
     ReplyKeyboardMarkup, KeyboardButton, FSInputFile
 )
 from aiogram.enums import ParseMode
@@ -108,6 +110,12 @@ def format_card(dt: datetime, title: str, cost: str, location: str, details: str
     if (details or "").strip():
         text += f"\n\n📝 {details.strip()}"
     return text
+
+def base_ics_caption() -> str:
+    return (
+        "📎 Файл события для календаря.\n"
+        "Открой файл и нажми «Добавить в календарь»."
+    )
 
 def make_chat_sig(chat_id: int) -> str:
     key = hashlib.sha256(BOT_TOKEN.encode("utf-8")).digest()
@@ -299,7 +307,7 @@ async def reminders_worker(bot: Bot):
                 due = await get_due_reminders(db)
                 for reminder_id, event_id, kind in due:
                     cur = await db.execute(
-                        "SELECT chat_id, poll_id, poll_message_id, dt_iso, title, cost, location, details "
+                        "SELECT chat_id, poll_id, poll_message_id, card_message_id, dt_iso, title, cost, location, details "
                         "FROM events WHERE id=?",
                         (event_id,),
                     )
@@ -309,7 +317,7 @@ async def reminders_worker(bot: Bot):
                         await mark_reminder_sent(db, reminder_id)
                         continue
 
-                    chat_id, poll_id, poll_msg_id, dt_iso, title, cost, location, details = event
+                    chat_id, poll_id, poll_msg_id, card_msg_id, dt_iso, title, cost, location, details = event
                     dt = datetime.fromisoformat(dt_iso).astimezone(TZ)
 
                     poll_link = None
@@ -358,14 +366,18 @@ async def reminders_worker(bot: Bot):
                                 text += f"\n\nОпрос: {poll_link}"
                             await bot.send_message(chat_id, text, parse_mode=ParseMode.MARKDOWN)
                     elif kind == REM_UNPIN_3H_AFTER:
-                        try:
-                            await bot.unpin_chat_message(chat_id, int(poll_msg_id))
-                        except Exception:
-                            logging.exception(
-                                "failed to unpin poll message: chat_id=%s message_id=%s",
-                                chat_id,
-                                poll_msg_id,
-                            )
+                        for mid, label in [(card_msg_id, "card"), (poll_msg_id, "poll")]:
+                            if not mid:
+                                continue
+                            try:
+                                await bot.unpin_chat_message(chat_id, int(mid))
+                            except Exception:
+                                logging.exception(
+                                    "failed to unpin %s message: chat_id=%s message_id=%s",
+                                    label,
+                                    chat_id,
+                                    mid,
+                                )
 
                     await mark_reminder_sent(db, reminder_id)
 
@@ -514,20 +526,30 @@ async def on_webapp_data(message: Message, bot: Bot):
             await db.commit()
 
         try:
-            await bot.edit_message_text(
+            filename = write_ics_file(event_id, dt, title, cost, location, details)
+            media = InputMediaDocument(
+                media=FSInputFile(filename),
+                caption=f"{format_card(dt, title, cost, location, details)}\n\n{base_ics_caption()}",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            await bot.edit_message_media(
                 chat_id=chat_id,
                 message_id=int(card_mid),
-                text=format_card(dt, title, cost, location, details),
-                parse_mode=ParseMode.MARKDOWN,
+                media=media,
                 reply_markup=None,
             )
         except Exception:
-            pass
-
-        try:
-            await _send_ics_to_chat(bot, chat_id, event_id)
-        except Exception:
-            pass
+            try:
+                await bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=int(card_mid),
+                    text=format_card(dt, title, cost, location, details),
+                    parse_mode=ParseMode.MARKDOWN,
+                    reply_markup=None,
+                )
+                await _send_ics_to_chat(bot, chat_id, event_id)
+            except Exception:
+                pass
 
         await message.answer("✅ Обновил событие.")
         return
@@ -587,31 +609,10 @@ async def on_webapp_data(message: Message, bot: Bot):
             await message.answer("Похоже, это время уже в прошлом.")
             return
 
-        # 3) Публикуем карточку в целевом чате
-        card_msg = await bot.send_message(
-            target_chat_id,
-            format_card(dt, title, cost, location, details),
-            parse_mode=ParseMode.MARKDOWN
-        )
-        logging.info("card message sent: chat_id=%s message_id=%s", target_chat_id, card_msg.message_id)
-
-        # 4) Публикуем опрос в целевом чате
-        poll_msg = await bot.send_poll(
-            chat_id=target_chat_id,
-            question=f"{title} — {dt.strftime('%Y-%m-%d %H:%M')}",
-            options=OPTIONS,
-            is_anonymous=False,
-            allows_multiple_answers=False,
-        )
-        logging.info("poll sent: chat_id=%s poll_id=%s message_id=%s", target_chat_id, poll_msg.poll.id, poll_msg.message_id)
-        try:
-            await bot.pin_chat_message(chat_id=target_chat_id, message_id=poll_msg.message_id)
-        except Exception:
-            logging.exception("failed to pin poll message: chat_id=%s message_id=%s", target_chat_id, poll_msg.message_id)
-
-        # 5) Сохраняем в БД и планируем напоминания
+        # 3) Сохраняем черновик в БД, чтобы получить event_id
+        temp_poll_id = f"pending-{uuid.uuid4().hex}"
         async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute(
+            cur = await db.execute(
                 """
                 INSERT INTO events(
                     chat_id,
@@ -630,9 +631,9 @@ async def on_webapp_data(message: Message, bot: Bot):
                 """,
                 (
                     target_chat_id,
-                    poll_msg.poll.id,
-                    poll_msg.message_id,
-                    card_msg.message_id,
+                    temp_poll_id,
+                    0,
+                    None,
                     message.from_user.id if message.from_user else None,
                     dt.isoformat(),
                     title,
@@ -642,41 +643,64 @@ async def on_webapp_data(message: Message, bot: Bot):
                     now_tz().isoformat(),
                 ),
             )
-
-            cur = await db.execute(
-                "SELECT id FROM events WHERE poll_id=?",
-                (poll_msg.poll.id,)
-            )
-            row = await cur.fetchone()
+            event_id = cur.lastrowid
             await cur.close()
+            await db.commit()
 
-            event_id = row[0]
+        # 4) Публикуем карточку + файл .ics в целевом чате (первым сообщением)
+        card_caption = f"{format_card(dt, title, cost, location, details)}\n\n{base_ics_caption()}"
+        card_msg = None
+        try:
+            card_msg = await _send_ics(
+                bot,
+                target_chat_id,
+                event_id,
+                caption=card_caption,
+                allow_chat_link=True,
+            )
+        except Exception:
+            logging.exception(
+                "failed to send combined card+ics message: chat_id=%s event_id=%s",
+                target_chat_id,
+                event_id,
+            )
+        if not card_msg:
+            card_msg = await bot.send_message(
+                target_chat_id,
+                format_card(dt, title, cost, location, details),
+                parse_mode=ParseMode.MARKDOWN
+            )
 
+        # 5) Публикуем опрос (следующим сообщением)
+        poll_msg = await bot.send_poll(
+            chat_id=target_chat_id,
+            question=f"{title} — {dt.strftime('%Y-%m-%d %H:%M')}",
+            options=OPTIONS,
+            is_anonymous=False,
+            allows_multiple_answers=False,
+        )
+        logging.info("poll sent: chat_id=%s poll_id=%s message_id=%s", target_chat_id, poll_msg.poll.id, poll_msg.message_id)
+
+        # 6) Обновляем запись и планируем напоминания
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "UPDATE events SET poll_id=?, poll_message_id=?, card_message_id=? WHERE id=?",
+                (poll_msg.poll.id, poll_msg.message_id, card_msg.message_id if card_msg else None, event_id),
+            )
             await create_or_replace_reminders(db, event_id, dt)
             await db.commit()
         logging.info("event saved: event_id=%s chat_id=%s", event_id, target_chat_id)
 
-        # 6) Добавляем кнопки управления на карточку
+        # 7) Автозакреп карточки и опроса
         try:
-            await bot.edit_message_reply_markup(
-                chat_id=target_chat_id,
-                message_id=card_msg.message_id,
-                reply_markup=None,
-            )
+            if card_msg:
+                await bot.pin_chat_message(target_chat_id, card_msg.message_id, disable_notification=True)
         except Exception:
             pass
-
-        # 7) Автозакреп карточки
         try:
-            await bot.pin_chat_message(target_chat_id, card_msg.message_id, disable_notification=True)
+            await bot.pin_chat_message(chat_id=target_chat_id, message_id=poll_msg.message_id)
         except Exception:
-            pass
-
-        # 7.1) Отправляем .ics в чат группы
-        try:
-            await _send_ics_to_chat(bot, target_chat_id, event_id)
-        except Exception:
-            pass
+            logging.exception("failed to pin poll message: chat_id=%s message_id=%s", target_chat_id, poll_msg.message_id)
 
         # 8) Сообщение пользователю (в том чате, где он открыл mini app)
         await message.answer("✅ Встреча создана. Опрос отправлен в чат 👇")
@@ -756,6 +780,16 @@ def make_ics(dt: datetime, title: str, location: str, description: str) -> str:
     ]
     return "\r\n".join(lines) + "\r\n"
 
+def write_ics_file(event_id: int, dt: datetime, title: str, cost: str, location: str, details: str) -> str:
+    description = f"Стоимость: {cost}"
+    if (details or "").strip():
+        description += f"\n\n{details.strip()}"
+    ics_text = make_ics(dt, title, location, description)
+    filename = f"event_{event_id}.ics"
+    with open(filename, "w", encoding="utf-8") as f:
+        f.write(ics_text)
+    return filename
+
 async def _send_ics(
     bot: Bot,
     chat_id: int,
@@ -780,10 +814,6 @@ async def _send_ics(
 
     event_chat_id, dt_iso, title, cost, location, details = row
     dt = datetime.fromisoformat(dt_iso).astimezone(TZ)
-
-    description = f"Стоимость: {cost}"
-    if (details or "").strip():
-        description += f"\n\n{details.strip()}"
 
     ics_link = ""
     webcal_link = ""
@@ -812,34 +842,30 @@ async def _send_ics(
     if webcal_link:
         caption += f"\nИли откройте [webcal-ссылку]({webcal_link})."
 
-    ics_text = make_ics(dt, title, location, description)
-    filename = f"event_{event_id}.ics"
-    with open(filename, "w", encoding="utf-8") as f:
-        f.write(ics_text)
+    filename = write_ics_file(event_id, dt, title, cost, location, details)
 
     try:
-        await bot.send_document(
+        msg = await bot.send_document(
             chat_id=chat_id,
             document=FSInputFile(filename),
             caption=caption,
             parse_mode=ParseMode.MARKDOWN
         )
+        return msg
     except TelegramForbiddenError:
         if context_message:
             await context_message.answer("Я не могу написать тебе в личку. Открой бота и нажми /start, затем повтори.")
         else:
             # если нет контекста — молча
             pass
+    return None
 
 async def _send_ics_to_user(bot: Bot, user_id: int, event_id: int, context_message: Optional[Message] = None):
     await _send_ics(
         bot,
         user_id,
         event_id,
-        caption=(
-            "📎 Файл события для календаря.\n"
-            "Открой файл и нажми «Добавить в календарь»."
-        ),
+        caption=base_ics_caption(),
         context_message=context_message,
         user_id=user_id,
     )
@@ -849,10 +875,7 @@ async def _send_ics_to_chat(bot: Bot, chat_id: int, event_id: int):
         bot,
         chat_id,
         event_id,
-        caption=(
-            "📎 Файл события для календаря.\n"
-            "Открой файл и нажми «Добавить в календарь»."
-        ),
+        caption=base_ics_caption(),
         context_message=None,
         allow_chat_link=True,
     )

@@ -516,6 +516,9 @@
         try { await loadEvent(eventId); } catch (_) { hint.textContent = "Ошибка загрузки."; }
       } else {
         hint.textContent = "";
+        if (!timeEl.value) {
+          timeEl.value = "20:00";
+        }
       }
 
       sendBtn.onclick = async () => {
