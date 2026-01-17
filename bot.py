@@ -42,6 +42,7 @@ OPT_YES, OPT_MAYBE, OPT_NO = 0, 1, 2
 
 REM_36H = "maybe_36h"
 REM_3H = "yes_3h"
+REM_UNPIN_3H_AFTER = "unpin_3h_after"
 
 router = Router()
 
@@ -229,6 +230,7 @@ async def init_db():
 async def create_or_replace_reminders(db, event_id: int, dt: datetime):
     t36 = dt - timedelta(hours=36)
     t3 = dt - timedelta(hours=3)
+    t_unpin = dt + timedelta(hours=3)
 
     await db.execute("DELETE FROM reminders WHERE event_id=?", (event_id,))
     if t36 > now_tz():
@@ -240,6 +242,11 @@ async def create_or_replace_reminders(db, event_id: int, dt: datetime):
         await db.execute(
             "INSERT OR IGNORE INTO reminders(event_id, kind, run_at_iso, sent) VALUES(?, ?, ?, 0)",
             (event_id, REM_3H, t3.isoformat()),
+        )
+    if t_unpin > now_tz():
+        await db.execute(
+            "INSERT OR IGNORE INTO reminders(event_id, kind, run_at_iso, sent) VALUES(?, ?, ?, 0)",
+            (event_id, REM_UNPIN_3H_AFTER, t_unpin.isoformat()),
         )
 
 async def get_due_reminders(db):
@@ -350,6 +357,15 @@ async def reminders_worker(bot: Bot):
                             if poll_link:
                                 text += f"\n\nОпрос: {poll_link}"
                             await bot.send_message(chat_id, text, parse_mode=ParseMode.MARKDOWN)
+                    elif kind == REM_UNPIN_3H_AFTER:
+                        try:
+                            await bot.unpin_chat_message(chat_id, int(poll_msg_id))
+                        except Exception:
+                            logging.exception(
+                                "failed to unpin poll message: chat_id=%s message_id=%s",
+                                chat_id,
+                                poll_msg_id,
+                            )
 
                     await mark_reminder_sent(db, reminder_id)
 
