@@ -15,9 +15,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from dotenv import load_dotenv
-load_dotenv()
 
-DB_PATH = os.getenv("DB_PATH", "calendar_bot.sqlite3")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+load_dotenv(os.path.join(BASE_DIR, ".env"))
+
+DB_PATH = os.getenv("DB_PATH", os.path.join(BASE_DIR, "calendar_bot.sqlite3"))
 TZ = ZoneInfo("Europe/Moscow")
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -396,17 +398,17 @@ async def api_calendar_upcoming(
         await cur.close()
 
     now_dt = datetime.now(tz=TZ)
+    today = now_dt.date()
     items: List[CalendarItem] = []
     for (eid, dt_iso, title, cost, location, details, poll_mid, poll_id, option_id) in rows:
+        event_dt = None
         try:
             event_dt = datetime.fromisoformat(dt_iso)
             if event_dt.tzinfo is None:
                 event_dt = event_dt.replace(tzinfo=TZ)
             event_dt = event_dt.astimezone(TZ)
         except Exception:
-            continue
-        if event_dt < now_dt:
-            continue
+            event_dt = None
 
         poll_link = None
         if str(chat_id).startswith("-100"):
@@ -423,7 +425,7 @@ async def api_calendar_upcoming(
             elif int(option_id) == 2:
                 my_vote = "no"
 
-        items.append(CalendarItem(
+        item = CalendarItem(
             id=eid,
             dt_iso=dt_iso,
             title=title,
@@ -432,7 +434,10 @@ async def api_calendar_upcoming(
             details=details,
             poll_link=poll_link,
             my_vote=my_vote
-        ))
+        )
+        if event_dt is not None and event_dt.date() < today:
+            continue
+        items.append(item)
         if len(items) >= limit:
             break
 

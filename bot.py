@@ -21,7 +21,9 @@ from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramForbiddenError
 
 from dotenv import load_dotenv
-load_dotenv()
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+load_dotenv(os.path.join(BASE_DIR, ".env"))
 
 logging.basicConfig(level=logging.INFO, force=True)
 
@@ -35,7 +37,7 @@ MINIAPP_LINK = os.getenv("MINIAPP_LINK", "")
 API_BASE_URL = os.getenv("API_BASE_URL", "")
 
 TZ = ZoneInfo("Europe/Moscow")
-DB_PATH = os.getenv("DB_PATH", "calendar_bot.sqlite3")
+DB_PATH = os.getenv("DB_PATH", os.path.join(BASE_DIR, "calendar_bot.sqlite3"))
 
 OPTIONS = ["я в деле", "надо подумать", "точно не смогу"]
 OPT_YES, OPT_MAYBE, OPT_NO = 0, 1, 2
