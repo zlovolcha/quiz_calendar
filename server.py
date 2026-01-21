@@ -18,7 +18,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 DB_PATH = os.getenv("DB_PATH", "calendar_bot.sqlite3")
-TZ = ZoneInfo("Europe/Vilnius")
+TZ = ZoneInfo("Europe/Moscow")
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:

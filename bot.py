@@ -97,10 +97,13 @@ CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders(sent, run_at_iso);
 def now_tz() -> datetime:
     return datetime.now(tz=TZ)
 
+def format_dt(dt: datetime) -> str:
+    return dt.strftime("%d-%m-%Y %H:%M")
+
 def format_card(dt: datetime, title: str, cost: str, location: str, details: str = "") -> str:
     text = (
         f"📅 **{title}**\n"
-        f"🕒 {dt.strftime('%Y-%m-%d %H:%M')}\n"
+        f"🕒 {format_dt(dt)}\n"
         f"📍 {location}\n"
         f"💸 {cost}"
     )
@@ -322,7 +325,7 @@ async def reminders_worker(bot: Bot):
                                 f"⏳ До встречи осталось ~36 часов.\n{mentions}{more}\n"
                                 f"**Вы как?** Переголосуйте, пожалуйста 🙂\n\n"
                                 f"📅 **{title}**\n"
-                                f"🕒 {dt.strftime('%Y-%m-%d %H:%M')}\n"
+                                f"🕒 {format_dt(dt)}\n"
                                 f"📍 {location}\n"
                                 f"💸 {cost}"
                             )
@@ -343,7 +346,7 @@ async def reminders_worker(bot: Bot):
                             text = (
                                 f"🔔 Через ~3 часа встреча!\n{mentions}{more}\n\n"
                                 f"📅 **{title}**\n"
-                                f"🕒 {dt.strftime('%Y-%m-%d %H:%M')}\n"
+                                f"🕒 {format_dt(dt)}\n"
                                 f"📍 {location}\n"
                                 f"💸 {cost}"
                             )
@@ -582,7 +585,7 @@ async def on_webapp_data(message: Message, bot: Bot):
         # 4) Публикуем опрос в целевом чате
         poll_msg = await bot.send_poll(
             chat_id=target_chat_id,
-            question=f"{title} — {dt.strftime('%Y-%m-%d %H:%M')}",
+            question=f"{title} — {format_dt(dt)}",
             options=OPTIONS,
             is_anonymous=False,
             allows_multiple_answers=False,
