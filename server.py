@@ -378,8 +378,6 @@ async def api_calendar_upcoming(
 
     user_id_param = user_id_final if user_id_final is not None else -1
 
-    now_iso = datetime.now(tz=TZ).isoformat()
-
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
             """
@@ -389,17 +387,27 @@ async def api_calendar_upcoming(
             FROM events e
             LEFT JOIN votes v
               ON v.poll_id = e.poll_id AND v.user_id = ?
-            WHERE e.chat_id = ? AND e.dt_iso >= ?
+            WHERE e.chat_id = ?
             ORDER BY e.dt_iso ASC
-            LIMIT ?
             """,
-            (user_id_param, chat_id, now_iso, limit),
+            (user_id_param, chat_id),
         )
         rows = await cur.fetchall()
         await cur.close()
 
+    now_dt = datetime.now(tz=TZ)
     items: List[CalendarItem] = []
     for (eid, dt_iso, title, cost, location, details, poll_mid, poll_id, option_id) in rows:
+        try:
+            event_dt = datetime.fromisoformat(dt_iso)
+            if event_dt.tzinfo is None:
+                event_dt = event_dt.replace(tzinfo=TZ)
+            event_dt = event_dt.astimezone(TZ)
+        except Exception:
+            continue
+        if event_dt < now_dt:
+            continue
+
         poll_link = None
         if str(chat_id).startswith("-100"):
             internal = int(str(abs(chat_id))[3:])
@@ -425,6 +433,8 @@ async def api_calendar_upcoming(
             poll_link=poll_link,
             my_vote=my_vote
         ))
+        if len(items) >= limit:
+            break
 
     return items
 
