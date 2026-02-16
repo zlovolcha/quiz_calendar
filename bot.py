@@ -1,13 +1,8 @@
-import os
 import json
 import asyncio
 import logging
-import hashlib
-import hmac
-from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
-from typing import Optional, List
+from typing import Optional
 
 import aiosqlite
 from aiogram import Bot, Dispatcher, Router, F
@@ -20,24 +15,26 @@ from aiogram.types import (
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramForbiddenError
 
-from dotenv import load_dotenv
-
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-load_dotenv(os.path.join(BASE_DIR, ".env"))
+from core import (
+    BOT_TOKEN,
+    BOT_USERNAME,
+    WEBAPP_URL,
+    MINIAPP_LINK,
+    TZ,
+    DB_PATH,
+    now_tz,
+    format_dt,
+    format_card,
+    make_chat_sig,
+    make_user_sig,
+    with_qs,
+    api_base_url,
+    build_poll_link,
+    make_ics,
+)
+from db_schema import CREATE_SQL
 
 logging.basicConfig(level=logging.INFO, force=True)
-
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-if not BOT_TOKEN:
-    raise RuntimeError("Set BOT_TOKEN env var")
-
-BOT_USERNAME = os.getenv("BOT_USERNAME", "")
-WEBAPP_URL = os.getenv("WEBAPP_URL", "https://bot01.ficsh.ru/event-form")
-MINIAPP_LINK = os.getenv("MINIAPP_LINK", "")
-API_BASE_URL = os.getenv("API_BASE_URL", "")
-
-TZ = ZoneInfo("Europe/Moscow")
-DB_PATH = os.getenv("DB_PATH", os.path.join(BASE_DIR, "calendar_bot.sqlite3"))
 
 OPTIONS = ["я в деле", "надо подумать", "точно не смогу"]
 OPT_YES, OPT_MAYBE, OPT_NO = 0, 1, 2
@@ -46,98 +43,6 @@ REM_36H = "maybe_36h"
 REM_3H = "yes_3h"
 
 router = Router()
-
-CREATE_SQL = """
-PRAGMA journal_mode=WAL;
-
-CREATE TABLE IF NOT EXISTS events (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  chat_id INTEGER NOT NULL,
-  poll_id TEXT NOT NULL UNIQUE,
-  poll_message_id INTEGER NOT NULL,
-  card_message_id INTEGER,
-  creator_user_id INTEGER,
-  dt_iso TEXT NOT NULL,
-  title TEXT NOT NULL,
-  cost TEXT NOT NULL,
-  location TEXT NOT NULL,
-  details TEXT NOT NULL DEFAULT '',
-  created_at_iso TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS votes (
-  poll_id TEXT NOT NULL,
-  user_id INTEGER NOT NULL,
-  option_id INTEGER,
-  updated_at_iso TEXT NOT NULL,
-  PRIMARY KEY (poll_id, user_id)
-);
-
-CREATE TABLE IF NOT EXISTS reminders (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  event_id INTEGER NOT NULL,
-  kind TEXT NOT NULL,
-  run_at_iso TEXT NOT NULL,
-  sent INTEGER NOT NULL DEFAULT 0,
-  sent_at_iso TEXT,
-  UNIQUE(event_id, kind),
-  FOREIGN KEY(event_id) REFERENCES events(id)
-);
-
-CREATE TABLE IF NOT EXISTS users (
-  user_id INTEGER PRIMARY KEY,
-  username TEXT,
-  first_name TEXT,
-  last_name TEXT,
-  updated_at_iso TEXT NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_events_chat_dt ON events(chat_id, dt_iso);
-CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders(sent, run_at_iso);
-"""
-
-def now_tz() -> datetime:
-    return datetime.now(tz=TZ)
-
-def format_dt(dt: datetime) -> str:
-    return dt.strftime("%d-%m-%Y %H:%M")
-
-def format_card(dt: datetime, title: str, cost: str, location: str, details: str = "") -> str:
-    text = (
-        f"📅 **{title}**\n"
-        f"🕒 {format_dt(dt)}\n"
-        f"📍 {location}\n"
-        f"💸 {cost}"
-    )
-    if (details or "").strip():
-        text += f"\n\n📝 {details.strip()}"
-    return text
-
-def make_chat_sig(chat_id: int) -> str:
-    key = hashlib.sha256(BOT_TOKEN.encode("utf-8")).digest()
-    msg = str(chat_id).encode("utf-8")
-    full = hmac.new(key, msg, hashlib.sha256).hexdigest()
-    return full[:20]
-
-def make_user_sig(chat_id: int, user_id: int) -> str:
-    key = hashlib.sha256(BOT_TOKEN.encode("utf-8")).digest()
-    msg = f"{chat_id}:{user_id}".encode("utf-8")
-    return hmac.new(key, msg, hashlib.sha256).hexdigest()
-
-def with_qs(url: str, params: dict) -> str:
-    parsed = urlparse(url)
-    query = dict(parse_qsl(parsed.query))
-    query.update(params)
-    return urlunparse(parsed._replace(query=urlencode(query)))
-
-def api_base_url() -> str:
-    if API_BASE_URL:
-        return API_BASE_URL.rstrip("/")
-    if WEBAPP_URL:
-        parsed = urlparse(WEBAPP_URL)
-        if parsed.scheme and parsed.netloc:
-            return urlunparse((parsed.scheme, parsed.netloc, "", "", "", "")).rstrip("/")
-    return ""
 
 def start_payload(text: str) -> str:
     if not text:
@@ -310,10 +215,7 @@ async def reminders_worker(bot: Bot):
                     chat_id, poll_id, poll_msg_id, dt_iso, title, cost, location, details = event
                     dt = datetime.fromisoformat(dt_iso).astimezone(TZ)
 
-                    poll_link = None
-                    if str(chat_id).startswith("-100"):
-                        internal = int(str(abs(chat_id))[3:])
-                        poll_link = f"https://t.me/c/{internal}/{poll_msg_id}"
+                    poll_link = build_poll_link(chat_id, poll_msg_id)
 
                     if kind == REM_36H:
                         users = await get_users_by_choice(db, poll_id, OPT_MAYBE)
@@ -503,13 +405,14 @@ async def on_webapp_data(message: Message, bot: Bot):
             await db.commit()
 
         try:
-            await bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=int(card_mid),
-                text=format_card(dt, title, cost, location, details),
-                parse_mode=ParseMode.MARKDOWN,
-                reply_markup=None,
-            )
+            if card_mid:
+                await bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=int(card_mid),
+                    text=format_card(dt, title, cost, location, details),
+                    parse_mode=ParseMode.MARKDOWN,
+                    reply_markup=None,
+                )
         except Exception:
             pass
 
@@ -713,37 +616,6 @@ async def on_event_delete(cb: CallbackQuery, bot: Bot):
     result = await delete_event(bot, event_id, cb.from_user.id)
     await cb.answer(result, show_alert=result != "Удалено ✅")
 
-def make_ics(dt: datetime, title: str, location: str, description: str) -> str:
-    dt_utc = dt.astimezone(ZoneInfo("UTC"))
-    dtend_utc = (dt + timedelta(hours=2)).astimezone(ZoneInfo("UTC"))
-
-    uid = hashlib.sha1(f"{dt.isoformat()}|{title}|{location}".encode("utf-8")).hexdigest() + "@telegram-meeting-bot"
-
-    def fmt(d: datetime) -> str:
-        return d.strftime("%Y%m%dT%H%M%SZ")
-
-    def esc(s: str) -> str:
-        s = s or ""
-        return s.replace("\\", "\\\\").replace("\n", "\\n").replace(",", "\\,").replace(";", "\\;")
-
-    lines = [
-        "BEGIN:VCALENDAR",
-        "VERSION:2.0",
-        "METHOD:PUBLISH",
-        "PRODID:-//YourApp//EN",
-        "CALSCALE:GREGORIAN",
-        "BEGIN:VEVENT",
-        f"UID:{uid}",
-        f"DTSTAMP:{fmt(datetime.now(tz=ZoneInfo('UTC')))}",
-        f"DTSTART:{fmt(dt_utc)}",
-        f"DTEND:{fmt(dtend_utc)}",
-        f"SUMMARY:{esc(title)}",
-        f"LOCATION:{esc(location)}",
-        f"DESCRIPTION:{esc(description)}",
-        "END:VEVENT",
-        "END:VCALENDAR",
-    ]
-    return "\r\n".join(lines) + "\r\n"
 
 async def _send_ics(
     bot: Bot,
@@ -802,11 +674,14 @@ async def _send_ics(
         caption += f"\nИли откройте [webcal-ссылку]({webcal_link})."
 
     ics_text = make_ics(dt, title, location, description)
-    filename = f"event_{event_id}.ics"
-    with open(filename, "w", encoding="utf-8") as f:
-        f.write(ics_text)
-
+    filename = None
     try:
+        import tempfile
+
+        with tempfile.NamedTemporaryFile("w", suffix=".ics", delete=False, encoding="utf-8") as f:
+            f.write(ics_text)
+            filename = f.name
+
         await bot.send_document(
             chat_id=chat_id,
             document=FSInputFile(filename),
@@ -819,6 +694,12 @@ async def _send_ics(
         else:
             # если нет контекста — молча
             pass
+    finally:
+        if filename:
+            try:
+                os.unlink(filename)
+            except Exception:
+                pass
 
 async def _send_ics_to_user(bot: Bot, user_id: int, event_id: int, context_message: Optional[Message] = None):
     await _send_ics(

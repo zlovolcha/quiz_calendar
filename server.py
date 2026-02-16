@@ -1,30 +1,26 @@
-import os
 import json
 import hmac
 import hashlib
 import urllib.parse
-from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
+from datetime import datetime
 from typing import Optional, List
 
 import aiosqlite
 from fastapi import FastAPI, HTTPException, Header, Query
-app = FastAPI() #//добавленная строка
 from fastapi.responses import HTMLResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from dotenv import load_dotenv
-
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-load_dotenv(os.path.join(BASE_DIR, ".env"))
-
-DB_PATH = os.getenv("DB_PATH", os.path.join(BASE_DIR, "calendar_bot.sqlite3"))
-TZ = ZoneInfo("Europe/Moscow")
-
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-if not BOT_TOKEN:
-    raise RuntimeError("Set BOT_TOKEN env var (same token as bot)")
+from core import (
+    BOT_TOKEN,
+    DB_PATH,
+    TZ,
+    make_chat_sig,
+    make_user_sig,
+    build_poll_link,
+    make_ics,
+)
+from db_schema import CREATE_SQL
 
 app = FastAPI()
 
@@ -36,54 +32,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-CREATE_SQL = """
-PRAGMA journal_mode=WAL;
-
-CREATE TABLE IF NOT EXISTS events (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  chat_id INTEGER NOT NULL,
-  poll_id TEXT NOT NULL UNIQUE,
-  poll_message_id INTEGER NOT NULL,
-  card_message_id INTEGER,
-  creator_user_id INTEGER,
-  dt_iso TEXT NOT NULL,
-  title TEXT NOT NULL,
-  cost TEXT NOT NULL,
-  location TEXT NOT NULL,
-  details TEXT NOT NULL DEFAULT '',
-  created_at_iso TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS votes (
-  poll_id TEXT NOT NULL,
-  user_id INTEGER NOT NULL,
-  option_id INTEGER,
-  updated_at_iso TEXT NOT NULL,
-  PRIMARY KEY (poll_id, user_id)
-);
-
-CREATE TABLE IF NOT EXISTS reminders (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  event_id INTEGER NOT NULL,
-  kind TEXT NOT NULL,
-  run_at_iso TEXT NOT NULL,
-  sent INTEGER NOT NULL DEFAULT 0,
-  sent_at_iso TEXT,
-  UNIQUE(event_id, kind),
-  FOREIGN KEY(event_id) REFERENCES events(id)
-);
-
-CREATE TABLE IF NOT EXISTS users (
-  user_id INTEGER PRIMARY KEY,
-  username TEXT,
-  first_name TEXT,
-  last_name TEXT,
-  updated_at_iso TEXT NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_events_chat_dt ON events(chat_id, dt_iso);
-CREATE INDEX IF NOT EXISTS idx_votes_poll_user ON votes(poll_id, user_id);
-"""
 
 @app.on_event("startup")
 async def startup():
@@ -135,54 +83,10 @@ def telegram_webapp_verify_initdata(init_data: str) -> dict:
     return {"user": user}
 
 
-def _chat_sig_expected(chat_id: int) -> str:
-    key = hashlib.sha256(BOT_TOKEN.encode("utf-8")).digest()
-    msg = str(chat_id).encode("utf-8")
-    full = hmac.new(key, msg, hashlib.sha256).hexdigest()
-    return full[:20]
-
-def _user_sig_expected(chat_id: int, user_id: int) -> str:
-    key = hashlib.sha256(BOT_TOKEN.encode("utf-8")).digest()
-    msg = f"{chat_id}:{user_id}".encode("utf-8")
-    return hmac.new(key, msg, hashlib.sha256).hexdigest()
-
-
 def verify_chat_sig(chat_id: int, sig: str):
-    exp = _chat_sig_expected(chat_id)
+    exp = make_chat_sig(chat_id)
     if not sig or not hmac.compare_digest(exp, sig):
         raise HTTPException(403, "bad signature")
-
-def make_ics(dt: datetime, title: str, location: str, description: str) -> str:
-    dt_utc = dt.astimezone(ZoneInfo("UTC"))
-    dtend_utc = (dt + timedelta(hours=2)).astimezone(ZoneInfo("UTC"))
-
-    uid = hashlib.sha1(f"{dt.isoformat()}|{title}|{location}".encode("utf-8")).hexdigest() + "@telegram-meeting-bot"
-
-    def fmt(d: datetime) -> str:
-        return d.strftime("%Y%m%dT%H%M%SZ")
-
-    def esc(s: str) -> str:
-        s = s or ""
-        return s.replace("\\", "\\\\").replace("\n", "\\n").replace(",", "\\,").replace(";", "\\;")
-
-    lines = [
-        "BEGIN:VCALENDAR",
-        "VERSION:2.0",
-        "METHOD:PUBLISH",
-        "PRODID:-//YourApp//EN",
-        "CALSCALE:GREGORIAN",
-        "BEGIN:VEVENT",
-        f"UID:{uid}",
-        f"DTSTAMP:{fmt(datetime.now(tz=ZoneInfo('UTC')))}",
-        f"DTSTART:{fmt(dt_utc)}",
-        f"DTEND:{fmt(dtend_utc)}",
-        f"SUMMARY:{esc(title)}",
-        f"LOCATION:{esc(location)}",
-        f"DESCRIPTION:{esc(description)}",
-        "END:VEVENT",
-        "END:VCALENDAR",
-    ]
-    return "\r\n".join(lines) + "\r\n"
 
 
 class EventView(BaseModel):
@@ -288,7 +192,7 @@ async def api_update_event(
             raise HTTPException(401, "Missing initData or user signature")
 
         if x_telegram_initdata == "" and user_sig:
-            expected = _user_sig_expected(int(chat_id), int(user_id_final))
+            expected = make_user_sig(int(chat_id), int(user_id_final))
             if not hmac.compare_digest(expected, user_sig):
                 raise HTTPException(403, "bad user signature")
 
@@ -337,7 +241,7 @@ async def api_delete_event(
             raise HTTPException(401, "Missing initData or user signature")
 
         if x_telegram_initdata == "" and user_sig:
-            expected = _user_sig_expected(int(chat_id), int(user_id_final))
+            expected = make_user_sig(int(chat_id), int(user_id_final))
             if not hmac.compare_digest(expected, user_sig):
                 raise HTTPException(403, "bad user signature")
 
@@ -373,7 +277,7 @@ async def api_calendar_upcoming(
         auth = telegram_webapp_verify_initdata(x_telegram_initdata)
         user_id_final = int(auth["user"]["id"])
     elif user_id is not None and user_sig:
-        expected = _user_sig_expected(chat_id, user_id)
+        expected = make_user_sig(chat_id, user_id)
         if not hmac.compare_digest(expected, user_sig):
             raise HTTPException(403, "bad user signature")
         user_id_final = int(user_id)
@@ -410,10 +314,7 @@ async def api_calendar_upcoming(
         except Exception:
             event_dt = None
 
-        poll_link = None
-        if str(chat_id).startswith("-100"):
-            internal = int(str(abs(chat_id))[3:])
-            poll_link = f"https://t.me/c/{internal}/{poll_mid}"
+        poll_link = build_poll_link(chat_id, poll_mid)
 
         my_vote = None
         # option_id: 0=yes,1=maybe,2=no
@@ -476,11 +377,11 @@ async def api_calendar_ics(
     chat_id, dt_iso, title, cost, location, details = row
 
     if x_telegram_initdata == "" and user_sig:
-        expected = _user_sig_expected(int(chat_id), int(user_id_final))
+        expected = make_user_sig(int(chat_id), int(user_id_final))
         if not hmac.compare_digest(expected, user_sig):
             raise HTTPException(403, "bad user signature")
     elif x_telegram_initdata == "" and chat_sig:
-        expected = _chat_sig_expected(int(chat_id))
+        expected = make_chat_sig(int(chat_id))
         if not hmac.compare_digest(expected, chat_sig):
             raise HTTPException(403, "bad chat signature")
 
