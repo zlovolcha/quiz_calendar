@@ -1,3 +1,4 @@
+import os
 import json
 import asyncio
 import logging
@@ -41,6 +42,7 @@ OPT_YES, OPT_MAYBE, OPT_NO = 0, 1, 2
 
 REM_36H = "maybe_36h"
 REM_3H = "yes_3h"
+REM_UNPIN_23 = "unpin_23"
 
 router = Router()
 
@@ -137,8 +139,10 @@ async def init_db():
         await db.commit()
 
 async def create_or_replace_reminders(db, event_id: int, dt: datetime):
+    dt_local = dt.astimezone(TZ)
     t36 = dt - timedelta(hours=36)
     t3 = dt - timedelta(hours=3)
+    t_unpin = dt_local.replace(hour=23, minute=0, second=0, microsecond=0)
 
     await db.execute("DELETE FROM reminders WHERE event_id=?", (event_id,))
     if t36 > now_tz():
@@ -150,6 +154,11 @@ async def create_or_replace_reminders(db, event_id: int, dt: datetime):
         await db.execute(
             "INSERT OR IGNORE INTO reminders(event_id, kind, run_at_iso, sent) VALUES(?, ?, ?, 0)",
             (event_id, REM_3H, t3.isoformat()),
+        )
+    if t_unpin > now_tz():
+        await db.execute(
+            "INSERT OR IGNORE INTO reminders(event_id, kind, run_at_iso, sent) VALUES(?, ?, ?, 0)",
+            (event_id, REM_UNPIN_23, t_unpin.isoformat()),
         )
 
 async def get_due_reminders(db):
@@ -202,7 +211,7 @@ async def reminders_worker(bot: Bot):
                 due = await get_due_reminders(db)
                 for reminder_id, event_id, kind in due:
                     cur = await db.execute(
-                        "SELECT chat_id, poll_id, poll_message_id, dt_iso, title, cost, location, details "
+                        "SELECT chat_id, poll_id, poll_message_id, card_message_id, dt_iso, title, cost, location, details "
                         "FROM events WHERE id=?",
                         (event_id,),
                     )
@@ -212,7 +221,7 @@ async def reminders_worker(bot: Bot):
                         await mark_reminder_sent(db, reminder_id)
                         continue
 
-                    chat_id, poll_id, poll_msg_id, dt_iso, title, cost, location, details = event
+                    chat_id, poll_id, poll_msg_id, card_msg_id, dt_iso, title, cost, location, details = event
                     dt = datetime.fromisoformat(dt_iso).astimezone(TZ)
 
                     poll_link = build_poll_link(chat_id, poll_msg_id)
@@ -237,7 +246,15 @@ async def reminders_worker(bot: Bot):
                                 text += f"\n\n📝 {details.strip()}"
                             if poll_link:
                                 text += f"\n\nОпрос: {poll_link}"
-                            await bot.send_message(chat_id, text, parse_mode=ParseMode.MARKDOWN)
+                            try:
+                                await bot.send_message(
+                                    chat_id,
+                                    text,
+                                    parse_mode=ParseMode.MARKDOWN,
+                                    reply_to_message_id=int(poll_msg_id),
+                                )
+                            except Exception:
+                                await bot.send_message(chat_id, text, parse_mode=ParseMode.MARKDOWN)
 
                     elif kind == REM_3H:
                         users = await get_users_by_choice(db, poll_id, OPT_YES)
@@ -254,9 +271,18 @@ async def reminders_worker(bot: Bot):
                                 f"📍 {location}\n"
                                 f"💸 {cost}"
                             )
+                            if (details or "").strip():
+                                text += f"\n\n📝 {details.strip()}"
                             if poll_link:
                                 text += f"\n\nОпрос: {poll_link}"
                             await bot.send_message(chat_id, text, parse_mode=ParseMode.MARKDOWN)
+                    elif kind == REM_UNPIN_23:
+                        for mid in (poll_msg_id, card_msg_id):
+                            if mid:
+                                try:
+                                    await bot.unpin_chat_message(chat_id=chat_id, message_id=int(mid))
+                                except Exception:
+                                    pass
 
                     await mark_reminder_sent(db, reminder_id)
 
@@ -417,7 +443,12 @@ async def on_webapp_data(message: Message, bot: Bot):
             pass
 
         try:
-            await _send_ics_to_chat(bot, chat_id, event_id)
+            await _send_ics_to_chat(
+                bot,
+                chat_id,
+                event_id,
+                reply_to_message_id=int(card_mid) if card_mid else None,
+            )
         except Exception:
             pass
 
@@ -625,6 +656,7 @@ async def _send_ics(
     context_message: Optional[Message] = None,
     user_id: Optional[int] = None,
     allow_chat_link: bool = False,
+    reply_to_message_id: Optional[int] = None,
 ):
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
@@ -686,7 +718,8 @@ async def _send_ics(
             chat_id=chat_id,
             document=FSInputFile(filename),
             caption=caption,
-            parse_mode=ParseMode.MARKDOWN
+            parse_mode=ParseMode.MARKDOWN,
+            reply_to_message_id=reply_to_message_id,
         )
     except TelegramForbiddenError:
         if context_message:
@@ -714,7 +747,12 @@ async def _send_ics_to_user(bot: Bot, user_id: int, event_id: int, context_messa
         user_id=user_id,
     )
 
-async def _send_ics_to_chat(bot: Bot, chat_id: int, event_id: int):
+async def _send_ics_to_chat(
+    bot: Bot,
+    chat_id: int,
+    event_id: int,
+    reply_to_message_id: Optional[int] = None,
+):
     await _send_ics(
         bot,
         chat_id,
@@ -725,6 +763,7 @@ async def _send_ics_to_chat(bot: Bot, chat_id: int, event_id: int):
         ),
         context_message=None,
         allow_chat_link=True,
+        reply_to_message_id=reply_to_message_id,
     )
 
 @router.callback_query(F.data.startswith("event:ics:"))
