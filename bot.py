@@ -46,6 +46,63 @@ REM_UNPIN_23 = "unpin_23"
 
 router = Router()
 
+
+async def _can_bot_pin_messages(bot: Bot, chat_id: int) -> tuple[bool, str]:
+    try:
+        me = await bot.get_me()
+        member = await bot.get_chat_member(chat_id=chat_id, user_id=me.id)
+        status = getattr(member, "status", "")
+        if status == "creator":
+            return True, "creator"
+        if status == "administrator":
+            if bool(getattr(member, "can_pin_messages", False)):
+                return True, "administrator_with_can_pin_messages"
+            return False, "administrator_without_can_pin_messages"
+        return False, f"status={status}"
+    except Exception as e:
+        return False, f"check_failed:{type(e).__name__}"
+
+
+async def _pin_message_if_allowed(
+    bot: Bot,
+    chat_id: int,
+    message_id: int,
+    kind: str,
+    disable_notification: bool = False,
+) -> tuple[bool, str]:
+    allowed, reason = await _can_bot_pin_messages(bot, chat_id)
+    if not allowed:
+        logging.warning(
+            "skip pin %s: chat_id=%s message_id=%s reason=%s",
+            kind,
+            chat_id,
+            message_id,
+            reason,
+        )
+        return False, reason
+    try:
+        await bot.pin_chat_message(
+            chat_id=chat_id,
+            message_id=message_id,
+            disable_notification=disable_notification,
+        )
+        logging.info(
+            "pin %s ok: chat_id=%s message_id=%s",
+            kind,
+            chat_id,
+            message_id,
+        )
+        return True, "ok"
+    except Exception as e:
+        logging.warning(
+            "pin %s failed: chat_id=%s message_id=%s error=%s",
+            kind,
+            chat_id,
+            message_id,
+            type(e).__name__,
+        )
+        return False, f"api_error:{type(e).__name__}"
+
 def start_payload(text: str) -> str:
     if not text:
         return ""
@@ -527,10 +584,12 @@ async def on_webapp_data(message: Message, bot: Bot):
             allows_multiple_answers=False,
         )
         logging.info("poll sent: chat_id=%s poll_id=%s message_id=%s", target_chat_id, poll_msg.poll.id, poll_msg.message_id)
-        try:
-            await bot.pin_chat_message(chat_id=target_chat_id, message_id=poll_msg.message_id)
-        except Exception:
-            logging.exception("failed to pin poll message: chat_id=%s message_id=%s", target_chat_id, poll_msg.message_id)
+        poll_pin_ok, poll_pin_reason = await _pin_message_if_allowed(
+            bot,
+            target_chat_id,
+            poll_msg.message_id,
+            kind="poll",
+        )
 
         # 5) Сохраняем в БД и планируем напоминания
         async with aiosqlite.connect(DB_PATH) as db:
@@ -590,10 +649,13 @@ async def on_webapp_data(message: Message, bot: Bot):
             pass
 
         # 7) Автозакреп карточки
-        try:
-            await bot.pin_chat_message(target_chat_id, card_msg.message_id, disable_notification=True)
-        except Exception:
-            pass
+        card_pin_ok, card_pin_reason = await _pin_message_if_allowed(
+            bot,
+            target_chat_id,
+            card_msg.message_id,
+            kind="card",
+            disable_notification=True,
+        )
 
         # 7.1) Отправляем .ics в чат группы
         try:
@@ -603,6 +665,16 @@ async def on_webapp_data(message: Message, bot: Bot):
 
         # 8) Сообщение пользователю (в том чате, где он открыл mini app)
         await message.answer("✅ Встреча создана. Опрос отправлен в чат 👇")
+        pin_failures = []
+        if not poll_pin_ok:
+            pin_failures.append(f"опрос: {poll_pin_reason}")
+        if not card_pin_ok:
+            pin_failures.append(f"карточка: {card_pin_reason}")
+        if pin_failures:
+            await message.answer(
+                "⚠️ Не удалось закрепить сообщения в чате.\n"
+                + "\n".join(pin_failures)
+            )
         return
 
     await message.answer("Неизвестное действие.")
