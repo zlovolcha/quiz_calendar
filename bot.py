@@ -267,81 +267,98 @@ async def reminders_worker(bot: Bot):
             async with aiosqlite.connect(DB_PATH) as db:
                 due = await get_due_reminders(db)
                 for reminder_id, event_id, kind in due:
-                    cur = await db.execute(
-                        "SELECT chat_id, poll_id, poll_message_id, card_message_id, dt_iso, title, cost, location, details "
-                        "FROM events WHERE id=?",
-                        (event_id,),
-                    )
-                    event = await cur.fetchone()
-                    await cur.close()
-                    if not event:
-                        await mark_reminder_sent(db, reminder_id)
-                        continue
+                    try:
+                        cur = await db.execute(
+                            "SELECT chat_id, poll_id, poll_message_id, card_message_id, dt_iso, title, cost, location, details "
+                            "FROM events WHERE id=?",
+                            (event_id,),
+                        )
+                        event = await cur.fetchone()
+                        await cur.close()
+                        if not event:
+                            await mark_reminder_sent(db, reminder_id)
+                            continue
 
-                    chat_id, poll_id, poll_msg_id, card_msg_id, dt_iso, title, cost, location, details = event
-                    dt = datetime.fromisoformat(dt_iso).astimezone(TZ)
+                        chat_id, poll_id, poll_msg_id, card_msg_id, dt_iso, title, cost, location, details = event
+                        dt = datetime.fromisoformat(dt_iso).astimezone(TZ)
 
-                    poll_link = build_poll_link(chat_id, poll_msg_id)
+                        poll_link = build_poll_link(chat_id, poll_msg_id)
 
-                    if kind == REM_36H:
-                        users = await get_users_by_choice(db, poll_id, OPT_MAYBE)
-                        if users:
-                            mentions = ", ".join(
-                                mention(uid, display_name(username, first_name, last_name))
-                                for uid, username, first_name, last_name in users[:30]
-                            )
-                            more = f" …и ещё {len(users)-30}" if len(users) > 30 else ""
-                            text = (
-                                f"⏳ До встречи осталось ~36 часов.\n{mentions}{more}\n"
-                                f"**Вы как?** Переголосуйте, пожалуйста 🙂\n\n"
-                                f"📅 **{title}**\n"
-                                f"🕒 {format_dt(dt)}\n"
-                                f"📍 {location}\n"
-                                f"💸 {cost}"
-                            )
-                            if (details or "").strip():
-                                text += f"\n\n📝 {details.strip()}"
-                            if poll_link:
-                                text += f"\n\nОпрос: {poll_link}"
-                            try:
-                                await bot.send_message(
-                                    chat_id,
-                                    text,
-                                    parse_mode=ParseMode.MARKDOWN,
-                                    reply_to_message_id=int(poll_msg_id),
+                        if kind == REM_36H:
+                            users = await get_users_by_choice(db, poll_id, OPT_MAYBE)
+                            if users:
+                                mentions = ", ".join(
+                                    mention(uid, display_name(username, first_name, last_name))
+                                    for uid, username, first_name, last_name in users[:30]
                                 )
-                            except Exception:
-                                await bot.send_message(chat_id, text, parse_mode=ParseMode.MARKDOWN)
-
-                    elif kind == REM_3H:
-                        users = await get_users_by_choice(db, poll_id, OPT_YES)
-                        if users:
-                            mentions = ", ".join(
-                                mention(uid, display_name(username, first_name, last_name))
-                                for uid, username, first_name, last_name in users[:30]
-                            )
-                            more = f" …и ещё {len(users)-30}" if len(users) > 30 else ""
-                            text = (
-                                f"🔔 Через ~3 часа встреча!\n{mentions}{more}\n\n"
-                                f"📅 **{title}**\n"
-                                f"🕒 {format_dt(dt)}\n"
-                                f"📍 {location}\n"
-                                f"💸 {cost}"
-                            )
-                            if (details or "").strip():
-                                text += f"\n\n📝 {details.strip()}"
-                            if poll_link:
-                                text += f"\n\nОпрос: {poll_link}"
-                            await bot.send_message(chat_id, text, parse_mode=ParseMode.MARKDOWN)
-                    elif kind == REM_UNPIN_23:
-                        for mid in (poll_msg_id, card_msg_id):
-                            if mid:
+                                more = f" …и ещё {len(users)-30}" if len(users) > 30 else ""
+                                text = (
+                                    f"⏳ До встречи осталось ~36 часов.\n{mentions}{more}\n"
+                                    f"**Вы как?** Переголосуйте, пожалуйста 🙂\n\n"
+                                    f"📅 **{title}**\n"
+                                    f"🕒 {format_dt(dt)}\n"
+                                    f"📍 {location}\n"
+                                    f"💸 {cost}"
+                                )
+                                if (details or "").strip():
+                                    text += f"\n\n📝 {details.strip()}"
+                                if poll_link:
+                                    text += f"\n\nОпрос: {poll_link}"
                                 try:
-                                    await bot.unpin_chat_message(chat_id=chat_id, message_id=int(mid))
+                                    await bot.send_message(
+                                        chat_id,
+                                        text,
+                                        parse_mode=ParseMode.MARKDOWN,
+                                        reply_to_message_id=int(poll_msg_id),
+                                    )
                                 except Exception:
-                                    pass
+                                    await bot.send_message(chat_id, text, parse_mode=ParseMode.MARKDOWN)
 
-                    await mark_reminder_sent(db, reminder_id)
+                        elif kind == REM_3H:
+                            users = await get_users_by_choice(db, poll_id, OPT_YES)
+                            if users:
+                                mentions = ", ".join(
+                                    mention(uid, display_name(username, first_name, last_name))
+                                    for uid, username, first_name, last_name in users[:30]
+                                )
+                                more = f" …и ещё {len(users)-30}" if len(users) > 30 else ""
+                                text = (
+                                    f"🔔 Через ~3 часа встреча!\n{mentions}{more}\n\n"
+                                    f"📅 **{title}**\n"
+                                    f"🕒 {format_dt(dt)}\n"
+                                    f"📍 {location}\n"
+                                    f"💸 {cost}"
+                                )
+                                if (details or "").strip():
+                                    text += f"\n\n📝 {details.strip()}"
+                                if poll_link:
+                                    text += f"\n\nОпрос: {poll_link}"
+                                await bot.send_message(chat_id, text, parse_mode=ParseMode.MARKDOWN)
+                        elif kind == REM_UNPIN_23:
+                            for mid in (poll_msg_id, card_msg_id):
+                                if mid:
+                                    try:
+                                        await bot.unpin_chat_message(chat_id=chat_id, message_id=int(mid))
+                                    except Exception:
+                                        pass
+
+                        await mark_reminder_sent(db, reminder_id)
+                    except TelegramForbiddenError as e:
+                        logging.warning(
+                            "skip reminder due to forbidden: reminder_id=%s event_id=%s kind=%s error=%s",
+                            reminder_id,
+                            event_id,
+                            kind,
+                            type(e).__name__,
+                        )
+                        await mark_reminder_sent(db, reminder_id)
+                    except Exception:
+                        logging.exception(
+                            "failed processing reminder: reminder_id=%s event_id=%s kind=%s",
+                            reminder_id,
+                            event_id,
+                            kind,
+                        )
 
                 await db.commit()
         except Exception:
