@@ -1,6 +1,6 @@
 services:
   quiz_calendar:
-    build: .
+    image: ghcr.io/zlovolcha/quiz_calendar:latest
     restart: always
     ports:
       - "6000:6000"
