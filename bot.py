@@ -197,7 +197,7 @@ async def init_db():
 
 async def create_or_replace_reminders(db, event_id: int, dt: datetime):
     dt_local = dt.astimezone(TZ)
-    t36 = dt - timedelta(hours=36)
+    t36 = dt - timedelta(hours=34)
     t3 = dt - timedelta(hours=3)
     t_unpin = dt_local.replace(hour=23, minute=0, second=0, microsecond=0)
 
@@ -293,7 +293,7 @@ async def reminders_worker(bot: Bot):
                                 )
                                 more = f" …и ещё {len(users)-30}" if len(users) > 30 else ""
                                 text = (
-                                    f"⏳ До встречи осталось ~36 часов.\n{mentions}{more}\n"
+                                    f"⏳ До встречи осталось ~34 часа.\n{mentions}{more}\n"
                                     f"**Вы как?** Переголосуйте, пожалуйста 🙂\n\n"
                                     f"📅 **{title}**\n"
                                     f"🕒 {format_dt(dt)}\n"
