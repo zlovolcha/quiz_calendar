@@ -4,6 +4,7 @@
 # DB
 *.sqlite3
 *.db
+data/
 
 # Python
 __pycache__/
