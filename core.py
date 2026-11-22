@@ -32,10 +32,15 @@ def format_dt(dt: datetime) -> str:
     return dt.strftime("%d-%m-%Y %H:%M")
 
 
+def format_event_dt(dt: datetime) -> str:
+    weekdays = ("пн", "вт", "ср", "чт", "пт", "сб", "вс")
+    return f"{dt:%d-%m-%Y} ({weekdays[dt.weekday()]}) {dt:%H:%M}"
+
+
 def format_card(dt: datetime, title: str, cost: str, location: str, details: str = "") -> str:
     text = (
         f"📅 **{title}**\n"
-        f"🕒 {format_dt(dt)}\n"
+        f"🕒 {format_event_dt(dt)}\n"
         f"📍 {location}\n"
         f"💸 {cost}"
     )

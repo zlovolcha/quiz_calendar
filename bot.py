@@ -25,6 +25,7 @@ from core import (
     DB_PATH,
     now_tz,
     format_dt,
+    format_event_dt,
     format_card,
     make_chat_sig,
     make_user_sig,
@@ -35,7 +36,9 @@ from core import (
 )
 from db_schema import CREATE_SQL
 
-logging.basicConfig(level=logging.INFO, force=True)
+from log_config import configure_logging
+
+configure_logging()
 
 OPTIONS = ["я в деле", "надо подумать", "точно не смогу"]
 OPT_YES, OPT_MAYBE, OPT_NO = 0, 1, 2
@@ -354,7 +357,7 @@ async def reminders_worker(bot: Bot):
                         await mark_reminder_sent(db, reminder_id)
                     except Exception:
                         logging.exception(
-                            "failed processing reminder: reminder_id=%s event_id=%s kind=%s",
+                            "Не удалось обработать напоминание; будет повторная попытка: reminder_id=%s event_id=%s kind=%s",
                             reminder_id,
                             event_id,
                             kind,
@@ -362,7 +365,7 @@ async def reminders_worker(bot: Bot):
 
                 await db.commit()
         except Exception:
-            logging.exception("reminders_worker error")
+            logging.exception("Ошибка службы напоминаний; работа будет продолжена")
         await asyncio.sleep(30)
 
 async def delete_event(bot: Bot, event_id: int, actor_user_id: int) -> str:
@@ -595,7 +598,7 @@ async def on_webapp_data(message: Message, bot: Bot):
         # 4) Публикуем опрос в целевом чате
         poll_msg = await bot.send_poll(
             chat_id=target_chat_id,
-            question=f"{title} — {format_dt(dt)}",
+            question=f"{title} — {format_event_dt(dt)}",
             options=OPTIONS,
             is_anonymous=False,
             allows_multiple_answers=False,

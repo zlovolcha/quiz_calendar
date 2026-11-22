@@ -10,7 +10,9 @@ from bot import router, init_db, reminders_worker
 from server import app as fastapi_app
 from core import BOT_TOKEN
 
-logging.basicConfig(level=logging.INFO, force=True)
+from log_config import configure_logging
+
+configure_logging()
 
 
 async def main():
@@ -24,7 +26,7 @@ async def main():
     dp.include_router(router)
 
     port = int(os.environ.get("PORT", 6000))
-    config = uvicorn.Config(fastapi_app, host="0.0.0.0", port=port, log_level="info")
+    config = uvicorn.Config(fastapi_app, host="0.0.0.0", port=port, log_level="info", log_config=None)
     server = uvicorn.Server(config)
 
     logging.info("Starting bot + server on port %d", port)
